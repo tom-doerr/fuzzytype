@@ -12,20 +12,19 @@ from fake_lm import cat_lm
 
 from fuzzytype.channel import ChannelCosts
 from fuzzytype.engine import Engine, EngineConfig
-from fuzzytype.search import PredictConfig
+from fuzzytype.search import Candidate, PredictConfig
 from fuzzytype.tui import _ROUND_STEPS, FuzzyTypeApp, quality_label
 
-CONTEXT = (1,)
+CONTEXT = (2,)  # "." -- survives the trailing-space stripping
 
 
 def _app():
     engine = Engine(
         lm=cat_lm(CONTEXT),
-        config=EngineConfig(preamble="", k=6),
+        config=EngineConfig(preamble=".", k=6),
         predict_config=PredictConfig(k=20, max_rounds=6),
         costs=ChannelCosts(),
     )
-    engine.text = " "  # the fake model's context token
     return FuzzyTypeApp(engine, model_loader=None)
 
 
@@ -69,7 +68,7 @@ def test_space_is_part_of_the_query_not_a_commit():
 
     query, text = _drive(steps)
     assert query == "c a"
-    assert text == " ", "nothing should have been committed"
+    assert text == "", "nothing should have been committed"
 
 
 def test_backspace_removes_a_keystroke_then_committed_text():
@@ -93,7 +92,9 @@ def test_accepting_a_row_commits_it_and_clears_the_query():
         return chosen, app.engine.text, app.query
 
     chosen, text, query = _drive(steps)
-    assert text.endswith(chosen)
+    # Candidates carry the space that joins them to the previous word, and it
+    # comes off again at the very start of a document.
+    assert text.endswith(chosen.lstrip())
     assert query == ""
 
 
@@ -230,3 +231,111 @@ def test_a_failed_model_load_can_be_retried():
     failed, tries = asyncio.run(main())
     assert "out of memory" in failed
     assert tries >= 2, "ctrl+r should have tried the model again"
+
+
+def test_the_caret_moves_inside_the_keystrokes():
+    async def steps(app, pilot):
+        await pilot.press("c", "a", "t")
+        await pilot.press("left", "left")
+        await pilot.pause()
+        return app.query, app.caret
+
+    query, caret = _drive(steps)
+    assert (query, caret) == ("cat", 1)
+
+
+def test_typing_inserts_at_the_caret():
+    async def steps(app, pilot):
+        await pilot.press("c", "t")
+        await pilot.press("left")
+        await pilot.press("a")
+        await pilot.pause()
+        return app.query, app.caret
+
+    query, caret = _drive(steps)
+    assert query == "cat"
+    assert caret == 2
+
+
+def test_backspace_deletes_behind_the_caret_not_at_the_end():
+    async def steps(app, pilot):
+        await pilot.press("c", "x", "t")
+        await pilot.press("left")       # between x and t
+        await pilot.press("backspace")  # removes the x
+        await pilot.pause()
+        return app.query
+
+    assert _drive(steps) == "ct"
+
+
+def test_delete_removes_ahead_of_the_caret():
+    async def steps(app, pilot):
+        await pilot.press("c", "a", "t")
+        await pilot.press("home", "delete")
+        await pilot.pause()
+        return app.query, app.caret
+
+    query, caret = _drive(steps)
+    assert (query, caret) == ("at", 0)
+
+
+def test_home_and_end_jump_to_either_side():
+    async def steps(app, pilot):
+        await pilot.press("c", "a", "t", "home")
+        await pilot.pause()
+        start = app.caret
+        await pilot.press("end")
+        await pilot.pause()
+        return start, app.caret
+
+    assert _drive(steps) == (0, 3)
+
+
+def test_the_caret_walks_on_into_committed_text():
+    """Past the keystrokes, left keeps going -- and the context follows it."""
+
+    async def steps(app, pilot):
+        app.engine.text = "hello there"
+        await pilot.press("left", "left", "left")
+        await pilot.pause()
+        return app.engine.text, app.engine.after
+
+    before, after = _drive(steps)
+    assert before == "hello th"
+    assert after == "ere", "the rest of the sentence is carried, not lost"
+
+
+def test_moving_back_predicts_from_the_new_position():
+    """The pool is for the old context, so it cannot be reused."""
+
+    async def steps(app, pilot):
+        app.engine.text = "hello there"
+        app.engine.pool = [Candidate("x", " x", -1.0, 0.0, 0, 1, ())]
+        await pilot.press("left")
+        await pilot.pause()
+        return app.engine.pool
+
+    assert _drive(steps) == []
+
+
+def test_right_walks_back_out_again():
+    async def steps(app, pilot):
+        app.engine.text = "hello there"
+        await pilot.press("left", "left", "right")
+        await pilot.pause()
+        return app.engine.text, app.engine.after
+
+    # two back, one forward: a net single step left
+    assert _drive(steps) == ("hello ther", "e")
+
+
+def test_accepting_a_suggestion_inserts_at_the_caret():
+    async def steps(app, pilot):
+        app.engine.text = "cat sat"
+        app.engine.after = " on it"
+        app.engine.commit(" here")
+        return app.engine.text, app.engine.after
+
+    text, after = _drive(steps)
+    assert text == "cat sat here"
+    assert after == " on it", "text after the caret stays put"

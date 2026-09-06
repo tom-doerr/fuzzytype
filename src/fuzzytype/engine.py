@@ -86,7 +86,13 @@ class Engine:
     config: EngineConfig = field(default_factory=EngineConfig)
     predict_config: PredictConfig = field(default_factory=PredictConfig)
     costs: ChannelCosts = field(default_factory=ChannelCosts)
+    #: Committed text to the *left* of the cursor. This is what the model
+    #: continues from, so moving the cursor changes what gets predicted.
     text: str = ""
+    #: Committed text to the right of the cursor. Carried along untouched: a
+    #: causal model cannot condition on it, so it is preserved rather than
+    #: predicted around.
+    after: str = ""
     pool: list[Candidate] = field(default_factory=list)
     #: The keystrokes the pool was decoded under; "" means unconstrained.
     pool_query: str = ""
@@ -105,13 +111,20 @@ class Engine:
         """
         if self.config.mode != "prompt":
             return self.context_ids()
-        prompt = build_prompt(self.text[-240:], query, self.examples)
+        prompt = build_prompt(self.text[-240:].rstrip(" \t"), query, self.examples)
         ids = self.lm.encode(prompt)
         limit = self.config.max_prompt_tokens
         return ids[-limit:] if len(ids) > limit else ids
 
     def context_ids(self) -> list[int]:
-        ids = self.lm.encode(self.config.preamble + self.text)
+        # A context ending in a space is off-distribution for this tokenizer:
+        # the space belongs to the *following* token, so " bread" is one token
+        # and a context already holding the space forces the rarer "bread".
+        # Measured on "...to buy some ", the model's likeliest continuations
+        # become digits -- "1", "2", "3" -- and word fragments; with the space
+        # removed they are " new", " more", " clothes". The space is dropped
+        # here and supplied by the candidate, which carries its own.
+        ids = self.lm.encode((self.config.preamble + self.text).rstrip(" \t"))
         limit = self.config.max_context_tokens
         return ids[-limit:] if len(ids) > limit else ids
 
@@ -265,9 +278,11 @@ class Engine:
         """
         if not self.text:
             raw = raw.lstrip()
+        elif self.text.endswith((" ", "\t")) and raw.startswith(" "):
+            # The caret can sit just after a space; candidates carry their own.
+            raw = raw.lstrip(" ")
         self.text += raw
-        self.pool = []
-        self.pool_query = ""
+        self._invalidate()
         return raw
 
     def commit_literal(self, typed: str) -> str:
@@ -286,5 +301,35 @@ class Engine:
         """Delete one character of committed text and invalidate the pool."""
         if self.text:
             self.text = self.text[:-1]
-            self.pool = []
-            self.pool_query = ""
+            self._invalidate()
+
+    def delete_text(self) -> None:
+        """Delete the character just after the cursor."""
+        if self.after:
+            self.after = self.after[1:]
+
+    def move_left(self) -> bool:
+        """Step the cursor one character back through committed text.
+
+        The character moves from the left side to the right side, which is
+        what makes the prediction follow the cursor: the model continues from
+        whatever is now behind it, so going back to fix an earlier word gives
+        suggestions for *that* point in the sentence rather than the end.
+        """
+        if not self.text:
+            return False
+        self.text, self.after = self.text[:-1], self.text[-1] + self.after
+        self._invalidate()
+        return True
+
+    def move_right(self) -> bool:
+        if not self.after:
+            return False
+        self.text, self.after = self.text + self.after[0], self.after[1:]
+        self._invalidate()
+        return True
+
+    def _invalidate(self) -> None:
+        """The context changed, so nothing found under the old one still holds."""
+        self.pool = []
+        self.pool_query = ""

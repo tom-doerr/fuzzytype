@@ -9,13 +9,16 @@ from fuzzytype.engine import Engine, EngineConfig
 from fuzzytype.search import Candidate, PredictConfig
 from fuzzytype.shorthand import build_prompt
 
-CONTEXT = (1,)
+#: The toy model's context token. A full stop rather than a space, because
+#: the engine keeps trailing spaces out of what it sends the model.
+CONTEXT = (2,)
+PREAMBLE = "."
 
 
 def _engine(**config):
-    # No preamble: the fake vocabulary cannot spell one, and these tests are
-    # about the engine's bookkeeping rather than the model's register.
-    config.setdefault("preamble", "")
+    # A minimal preamble the toy vocabulary can spell, and which survives the
+    # trailing-space stripping so the fake still sees the context it expects.
+    config.setdefault("preamble", PREAMBLE)
     return Engine(
         lm=cat_lm(CONTEXT),
         config=EngineConfig(**config),
@@ -79,7 +82,6 @@ def test_seeds_are_empty_with_nothing_typed():
 
 def test_a_decode_is_only_requested_when_the_pool_stops_explaining():
     engine = _engine()
-    engine.text = " "  # the fake model's context token
     engine.refresh("")
     assert engine.pool, "the fake model should produce candidates"
     # An ordinary prefix of a pooled candidate needs no GPU work...
@@ -94,7 +96,7 @@ def test_an_empty_pool_always_needs_a_decode():
 
 def test_context_is_truncated_to_bound_the_forward_pass():
     engine = _engine(max_context_tokens=4)
-    engine.text = " " + " cat" * 50
+    engine.text = " cat" * 50
     assert len(engine.context_ids()) == 4
 
 
@@ -116,7 +118,6 @@ def test_the_pool_accumulates_across_decodes():
     phrases from nothing each time.
     """
     engine = _engine()
-    engine.text = " "
     engine.refresh("")
     first = {c.text for c in engine.pool}
     assert first
@@ -126,7 +127,6 @@ def test_the_pool_accumulates_across_decodes():
 
 def test_the_pool_is_bounded():
     engine = _engine(max_pool=2)
-    engine.text = " "
     engine.refresh("")
     engine.refresh("ca")
     assert len(engine.pool) <= 2
@@ -139,14 +139,13 @@ def test_the_next_decode_can_be_given_what_is_already_known():
     candidates -- but the mechanism has to keep working.
     """
     engine = _engine(resume_seeds=8)
-    engine.text = " "
     engine.refresh("")
     known = {c.raw for c in engine.pool}
     assert known & set(engine.seeds("ca"))
 
 
 def _prompt_engine(**config):
-    config.setdefault("preamble", "")
+    config.setdefault("preamble", PREAMBLE)
     config.setdefault("mode", "prompt")
     return Engine(
         lm=cat_lm(CONTEXT),
@@ -190,7 +189,6 @@ def _with_fake_prompt(engine):
 
 def test_rescoring_reprices_without_searching_again():
     engine = _with_fake_prompt(_prompt_engine())
-    engine.text = " "
     engine.pool = [
         Candidate("cat", " cat", -99.0, 0.0, 0, 1, ()),
         Candidate("car", " car", -99.0, 0.0, 0, 1, ()),
@@ -204,7 +202,6 @@ def test_rescoring_reprices_without_searching_again():
 
 def test_rescoring_is_bounded_and_drops_the_tail():
     engine = _with_fake_prompt(_prompt_engine(max_rescore=1))
-    engine.text = " "
     engine.pool = [
         Candidate("cat", " cat", -1.0, 0.0, 0, 1, ()),
         Candidate("car", " car", -2.0, 0.0, 0, 1, ()),
@@ -218,3 +215,23 @@ def test_channel_mode_does_not_rescore():
     engine = _engine()
     engine.pool = [Candidate("cat", " cat", -1.0, 0.0, 0, 1, ())]
     assert engine.rescore("ca") == 0
+
+
+def test_a_trailing_space_is_kept_out_of_the_model_context():
+    """A context ending in a space is off-distribution for this tokenizer.
+
+    Spaces belong to the following token, so " bread" is one token and a
+    context already holding the space forces the rarer "bread". Measured, the
+    likeliest continuations of "...to buy some " become digits and word
+    fragments; without the space they are " new", " more", " clothes".
+    """
+    engine = _engine(preamble="")
+    engine.text = " cat "
+    assert engine.lm.decode(engine.context_ids()) == " cat"
+
+
+def test_committing_after_a_space_does_not_double_it():
+    engine = _engine()
+    engine.text = "hello "
+    engine.commit(" there")
+    assert engine.text == "hello there"

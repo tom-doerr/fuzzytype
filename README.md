@@ -110,7 +110,7 @@ that disagree with your keystrokes are abandoned after one token, branches
 that agree are decoded many tokens deep. The unpromising strings are never
 decoded at all.
 
-### Five things that were not obvious
+### Six things that were not obvious
 
 Each of these was a bug found by measurement, and each is documented at the
 code that fixes it.
@@ -140,6 +140,17 @@ of the finished one — measured at 8 nats for `" aprico"` versus `" apricot"`.
 That is an artifact of an unnatural token split, not a statement about
 apricots, so each finished candidate is re-priced under its own tokenization
 and merged in.
+
+**Never hand the model a context that ends in a space.** Spaces belong to the
+*following* token — `" bread"` is one token — so a context that already holds
+the space forces the rarer spaceless spelling and lands the model somewhere it
+has hardly been. Measured after `"...to buy some "`, its likeliest
+continuations are the digits `1`, `2`, `3` and word fragments; drop the space
+and they are `" new"`, `" more"`, `" clothes"`. The space is kept out of the
+context and supplied by the candidate, which carries its own. This one is easy
+to never notice: it costs quality everywhere rather than failing anywhere, and
+it showed up as a stray `1` sitting at 16% among the idle suggestions. Fixing
+it moved `par` → `Paris` from 49% to 91%.
 
 **A prefix lookup must order the whole range, not the first slice of it.**
 Thousands of tokens begin with `h`, so taking the first 512 alphabetically and
@@ -264,6 +275,15 @@ Useful options:
 | `--max-rounds` | batched forward passes per decode — more rounds finds more and longer phrases (`ctrl+up` / `ctrl+down` adjusts it live) |
 | `--max-chars` | longest candidate to decode |
 
+### Editing
+
+`left` / `right` move the caret through what you are typing, and keep going
+into text you have already accepted — the suggestions follow, so going back to
+fix an earlier word predicts for *that* point in the sentence rather than the
+end. `home` / `end` jump to either side, `backspace` and `delete` cut behind
+and ahead. Text to the right of the caret is carried along untouched; a causal
+model cannot condition on it, so it is preserved rather than predicted around.
+
 Press `f1` in the TUI for the keys.
 
 ## Tests
@@ -272,7 +292,7 @@ Press `f1` in the TUI for the keys.
 python -m pytest
 ```
 
-130 tests, no GPU and no download: the search runs against a deterministic fake
+141 tests, no GPU and no download: the search runs against a deterministic fake
 model with a handful of string "tokens" and an explicit probability table,
 which is what makes it possible to assert that three spellings of `"cat"` sum
 to exactly 0.7 and that a pruned branch was never *explored* rather than

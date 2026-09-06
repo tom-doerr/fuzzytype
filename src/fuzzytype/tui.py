@@ -79,7 +79,9 @@ add a letter, or delete one that was a typo.
 | `up` / `down` | move the selection |
 | `enter` / `tab` | accept the selected suggestion |
 | `alt+1` ... `alt+9` | accept that row directly |
-| `backspace` | delete a keystroke, then delete committed text |
+| `left` / `right` | move the caret; past the keystrokes it walks into the text you have already accepted, and the suggestions follow it |
+| `home` / `end` | jump to either end of the keystrokes |
+| `backspace` / `delete` | delete behind or ahead of the caret |
 | `ctrl+l` | commit exactly what you typed, uncorrected |
 | `ctrl+s` | cycle how much longer sentences are preferred |
 | `ctrl+up` / `ctrl+down` (or `f3` / `f2`) | think harder or less hard -- more rounds finds more and longer phrases, and costs time |
@@ -169,6 +171,11 @@ class FuzzyTypeApp(App):
         ("enter,tab", "accept", "accept"),
         ("up", "move(-1)", "up"),
         ("down", "move(1)", "down"),
+        ("left", "caret(-1)", "left"),
+        ("right", "caret(1)", "right"),
+        ("home", "caret_end(0)", ""),
+        ("end", "caret_end(1)", ""),
+        ("delete", "delete", ""),
         ("ctrl+l", "accept_literal", "literal"),
         ("ctrl+s", "cycle_length", "length"),
         ("ctrl+up,f3", "rounds(1)", "+think"),
@@ -180,6 +187,10 @@ class FuzzyTypeApp(App):
 
     query: reactive[str] = reactive("")
     selected: reactive[int] = reactive(0)
+    #: Where in the keystrokes the caret sits. The keystrokes themselves sit
+    #: at the document cursor, so walking off either end of them moves the
+    #: document cursor instead -- left and right simply keep going.
+    caret: reactive[int] = reactive(0)
 
     def __init__(self, engine: Engine, model_loader=None) -> None:
         super().__init__()
@@ -342,8 +353,9 @@ class FuzzyTypeApp(App):
     def on_key(self, event) -> None:
         """Own the keyboard: this is an input method, not a form field."""
         if event.key == "backspace":
-            if self.query:
-                self.query = self.query[:-1]
+            if self.caret > 0:
+                self.query = self.query[: self.caret - 1] + self.query[self.caret :]
+                self.caret -= 1
             else:
                 self.engine.backspace_text()
                 self._request_decode()
@@ -351,7 +363,10 @@ class FuzzyTypeApp(App):
             event.stop()
             return
         if event.is_printable and event.character:
-            self.query += event.character
+            self.query = (
+                self.query[: self.caret] + event.character + self.query[self.caret :]
+            )
+            self.caret += 1
             self._after_typing()
             event.stop()
 
@@ -374,6 +389,38 @@ class FuzzyTypeApp(App):
             self._request_decode()
 
     # -- actions ---------------------------------------------------------
+    def action_caret(self, delta: int) -> None:
+        """Move the caret, walking into committed text at either end.
+
+        Stepping past the keystrokes moves the document cursor, so the
+        suggestions become suggestions for *that* point in the sentence --
+        going back to fix an earlier word predicts from there rather than
+        from the end.
+        """
+        target = self.caret + delta
+        if 0 <= target <= len(self.query):
+            self.caret = target
+        elif delta < 0:
+            if self.engine.move_left():
+                self._request_decode()
+        elif self.engine.move_right():
+            self._request_decode()
+        self._render()
+
+    def action_caret_end(self, end: int) -> None:
+        self.caret = len(self.query) if end else 0
+        self._render()
+
+    def action_delete(self) -> None:
+        """Delete forwards: the rest of the keystrokes first, then the text."""
+        if self.caret < len(self.query):
+            self.query = self.query[: self.caret] + self.query[self.caret + 1 :]
+            self._after_typing()
+            return
+        self.engine.delete_text()
+        self._request_decode()
+        self._render()
+
     def action_move(self, delta: int) -> None:
         if not self._suggestions:
             return
@@ -388,6 +435,7 @@ class FuzzyTypeApp(App):
             return
         self.engine.commit(self._suggestions[index].raw)
         self.query = ""
+        self.caret = 0
         self.selected = 0
         self._request_decode()
         self._render()
@@ -397,6 +445,7 @@ class FuzzyTypeApp(App):
             return
         self.engine.commit_literal(self.query)
         self.query = ""
+        self.caret = 0
         self.selected = 0
         self._request_decode()
         self._render()
@@ -453,12 +502,17 @@ class FuzzyTypeApp(App):
         self._render_status()
 
     def _render_document(self) -> None:
-        body = Text(self.engine.text or "", style="dim")
-        if self.query:
-            body.append(self.query, style="bold yellow")
-        body.append("█", style="bold yellow")  # cursor
-        if not self.engine.text and not self.query:
-            body = Text("start typing...", style="dim italic")
+        engine = self.engine
+        if not engine.text and not engine.after and not self.query:
+            self.query_one("#document", Static).update(
+                Text("start typing...", style="dim italic")
+            )
+            return
+        body = Text(engine.text, style="dim")
+        body.append(self.query[: self.caret], style="bold yellow")
+        body.append("▏", style="bold #ffcc00 reverse")
+        body.append(self.query[self.caret :], style="bold yellow")
+        body.append(engine.after, style="dim")
         self.query_one("#document", Static).update(body)
 
     def _render_table(self) -> None:
