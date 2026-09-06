@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fuzzytype"
+version = "0.1.0"
+description = "Predictive text input: a base LM decodes the likely continuations, a noisy-channel fuzzy matcher decides which one you are typing"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Tom Doerr" }]
+dependencies = [
+    "torch>=2.4",
+    "transformers>=4.45",
+    "textual>=0.80",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+fuzzytype = "fuzzytype.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
