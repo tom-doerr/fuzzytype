@@ -21,9 +21,15 @@ DEFAULT_MODEL = "Qwen/Qwen3.5-0.8B-Base"
 class TopK:
     """Truncated next-token distribution at one position.
 
-    ``kept_mass`` is the probability of the tokens actually returned, reported
-    rather than discarded so callers can distinguish "the model was confident"
-    from "we threw away half the distribution to keep the search small".
+    ``kept_mass`` is the probability of the tokens actually returned --
+    including any requested by ``extra_ids`` -- reported rather than discarded
+    so callers can distinguish "the model was confident" from "we threw away
+    half the distribution to keep the search small".
+
+    Every ``logprob`` here is taken from a log-softmax over the *whole*
+    vocabulary. Truncating to the top-k, or adding a token back in because it
+    matches the keystrokes, changes which continuations get explored and never
+    what any of them is worth.
     """
 
     token_ids: tuple[int, ...]

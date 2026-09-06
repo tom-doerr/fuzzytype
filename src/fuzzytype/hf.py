@@ -24,6 +24,7 @@ this keeps the backend a single stateless call.
 
 from __future__ import annotations
 
+import math
 from bisect import bisect_left
 from collections.abc import Sequence
 
@@ -291,6 +292,7 @@ class HFLanguageModel:
                     wanted = list(extra_ids[i]) if extra_ids is not None else []
                     seen = set(ids)
                     wanted = [t for t in dict.fromkeys(wanted) if t not in seen]
+                    mass = float(sum(probs_l[row][:n]))
                     if wanted and extra_keep > 0:
                         picked = torch.tensor(
                             wanted, dtype=torch.long, device=self.device
@@ -301,10 +303,17 @@ class HFLanguageModel:
                         )[:extra_keep]
                         ids.extend(t for t, _ in best)
                         lps.extend(lp for _, lp in best)
+                        # These are extra tokens *kept*, so they belong in the
+                        # mass that says how much was kept. Their
+                        # log-probabilities are untouched -- the row is a
+                        # log_softmax over the whole vocabulary, so a token
+                        # reached this way is worth exactly what it would have
+                        # been worth inside the top-k.
+                        mass += float(sum(math.exp(lp) for _, lp in best))
                     results[i] = TopK(
                         token_ids=tuple(ids),
                         logprobs=tuple(lps),
-                        kept_mass=float(sum(probs_l[row][:n])),
+                        kept_mass=mass,
                     )
         missing = [i for i, r in enumerate(results) if r is None]
         if missing:  # pragma: no cover - defensive

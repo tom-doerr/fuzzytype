@@ -92,7 +92,7 @@ class FakeLM:
                 TopK(
                     token_ids=tuple(token_ids),
                     logprobs=tuple(logprobs),
-                    kept_mass=sum(p for _, p in kept),
+                    kept_mass=sum(math.exp(lp) for lp in logprobs),
                 )
             )
         return results

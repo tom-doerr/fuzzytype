@@ -274,3 +274,30 @@ def test_batched_pricing_matches_pricing_one_at_a_time():
     together = lm.sequence_logprobs([(CONTEXT, c) for c in conts])
     alone = [lm.sequence_logprobs([(CONTEXT, c)])[0] for c in conts]
     assert together == pytest.approx(alone)
+
+
+def test_a_token_is_worth_the_same_however_the_search_reaches_it():
+    """Widening the search must not reprice anything.
+
+    Tokens are pulled back in when they match the keystrokes, which changes
+    which continuations get explored. Their log-probabilities come from a
+    softmax over the whole vocabulary, so a token reached that way is worth
+    exactly what it would have been worth inside the top-k -- otherwise the
+    posterior would quietly depend on how hard the search happened to look.
+    """
+    lm = cat_lm(CONTEXT)
+    wide = lm.top_next([CONTEXT], top_k=10, top_p=1.0)[0]
+    reference = dict(zip(wide.token_ids, wide.logprobs))
+
+    narrow = lm.top_next([CONTEXT], top_k=1, top_p=1.0)[0]
+    hidden = [t for t in reference if t not in narrow.token_ids]
+    assert hidden, "the narrow call should have hidden something"
+
+    recovered = lm.top_next(
+        [CONTEXT], top_k=1, top_p=1.0, extra_ids=[hidden], extra_keep=len(hidden)
+    )[0]
+    by_id = dict(zip(recovered.token_ids, recovered.logprobs))
+    for token in hidden:
+        assert by_id[token] == pytest.approx(reference[token])
+    # ...and the mass reported counts what was actually handed back.
+    assert recovered.kept_mass == pytest.approx(wide.kept_mass)
