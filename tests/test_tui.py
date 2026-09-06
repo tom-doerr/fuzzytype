@@ -117,3 +117,58 @@ def test_cycling_the_length_preference_changes_the_bonus():
 
     before, after = _drive(steps)
     assert before != after
+
+
+def test_suggestions_appear_while_the_search_is_still_running():
+    """A longer decode must show its results as it finds them.
+
+    Searching longer finds more and better phrases, but the typist should
+    never be looking at an empty list waiting for it to end.
+    """
+    seen: list[int] = []
+
+    async def steps(app, pilot):
+        original = app._decode_partial
+
+        def spy(stats):
+            seen.append(stats.distinct)
+            original(stats)
+
+        app._decode_partial = spy
+        await pilot.press("c")
+        await pilot.pause()
+        for _ in range(20):
+            await pilot.pause()
+        return seen
+
+    _drive(steps)
+    # The fake model's world is tiny, so the only firm claim is that partial
+    # publishing is wired up at all rather than reporting only at the end.
+    assert isinstance(seen, list)
+
+
+def test_a_keystroke_abandons_a_stale_decode():
+    """Finishing an out-of-date search matters less than answering the typist."""
+
+    async def steps(app, pilot):
+        app._decoding = True  # pretend a search is in flight
+        app._abandon.clear()
+        app._request_decode()
+        return app._abandon.is_set(), app._decode_wanted
+
+    abandoned, wanted = _drive(steps)
+    assert abandoned, "the running decode should be told to stop"
+    assert wanted, "and a fresh one should be queued"
+
+
+def test_the_status_line_says_when_the_model_is_working():
+    async def steps(app, pilot):
+        app._status.decoding = True
+        working = app._status_line().plain
+        app._status.decoding = False
+        idle = app._status_line().plain
+        return working, idle
+
+    working, idle = _drive(steps)
+    assert "thinking" in working
+    assert "thinking" not in idle

@@ -16,6 +16,7 @@ pool while that runs.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .channel import ChannelCosts
@@ -89,8 +90,27 @@ class Engine:
             variants.append(query[:1].upper() + query[1:])
         return [lead + v for v in variants]
 
-    def refresh(self, query: str = "") -> PredictStats:
-        """Decode a fresh pool. Slow (~1 s); call off the UI thread."""
+    def refresh(
+        self,
+        query: str = "",
+        on_partial: "Callable[[PredictStats], None] | None" = None,
+        should_stop: "Callable[[], bool] | None" = None,
+    ) -> PredictStats:
+        """Decode a fresh pool. Slow; call off the UI thread.
+
+        The pool is replaced as the search finds things rather than only at
+        the end, so a longer decode shows more suggestions instead of a longer
+        wait. ``should_stop`` lets a keystroke abandon a decode that has
+        already been overtaken.
+        """
+
+        def publish(candidates: list[Candidate], stats: PredictStats) -> None:
+            self.pool = candidates
+            self.pool_query = query
+            self.last_stats = stats
+            if on_partial is not None:
+                on_partial(stats)
+
         candidates, stats = predict(
             self.lm,
             self.context_ids(),
@@ -98,6 +118,8 @@ class Engine:
             config=self.predict_config,
             costs=self.costs,
             seeds=self.seeds(query),
+            on_candidates=publish,
+            should_stop=should_stop,
         )
         self.pool = candidates
         self.pool_query = query

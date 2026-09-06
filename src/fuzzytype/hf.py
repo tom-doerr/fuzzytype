@@ -96,6 +96,7 @@ class HFLanguageModel:
         self.eos_token_id = self.tokenizer.eos_token_id
         self._token_bytes, self.special_token_ids = self._build_token_bytes()
         self._prefix_keys, self._prefix_ids = self._build_prefix_index()
+        self._short_prefixes = self._build_short_prefixes()
 
     def _build_prefix_index(self) -> tuple[list[str], list[int]]:
         """Vocabulary sorted by its text, for "which words start with this".
@@ -118,20 +119,49 @@ class HFLanguageModel:
         )
         return [k for k, _ in pairs], [i for _, i in pairs]
 
+    def _build_short_prefixes(self, depth: int = 2, cap: int = 2048) -> dict:
+        """Shortest-first token lists for one- and two-character prefixes.
+
+        These are the ranges too large to order at query time -- and the ones
+        that matter most, since a word abbreviated to a single letter is
+        exactly the case that needs them.
+        """
+        buckets: dict[str, list[tuple[int, int]]] = {}
+        for key, tid in zip(self._prefix_keys, self._prefix_ids):
+            for n in range(1, min(depth, len(key)) + 1):
+                buckets.setdefault(key[:n], []).append((len(key), tid))
+        out = {}
+        for prefix, entries in buckets.items():
+            entries.sort()
+            out[prefix] = tuple(tid for _, tid in entries[:cap])
+        return out
+
     def tokens_with_prefix(self, prefix: str, limit: int = 512) -> list[int]:
-        """Token ids whose text starts with ``prefix``, ignoring case and space."""
+        """Token ids whose text starts with ``prefix``, ignoring case and space.
+
+        Ordered shortest-key first, because when only a few can be taken the
+        short word is nearly always the one meant -- "how" before "however".
+
+        Short prefixes are precomputed. Taking the first N of the alphabetical
+        range and sorting *those* by length is a trap: thousands of tokens
+        begin with "h", so the cut lands somewhere in "hab..." and "how" is
+        never seen at all, which silently breaks abbreviation past the first
+        word. The ordering has to be applied to the whole range.
+        """
         key = prefix.lstrip().lower()
         if not key:
             return []
-        out: list[int] = []
+        bucket = self._short_prefixes.get(key)
+        if bucket is not None:
+            return list(bucket[:limit])
+        found: list[tuple[int, int]] = []
         start = bisect_left(self._prefix_keys, key)
         for i in range(start, len(self._prefix_keys)):
             if not self._prefix_keys[i].startswith(key):
                 break
-            out.append(self._prefix_ids[i])
-            if len(out) >= limit:
-                break
-        return out
+            found.append((len(self._prefix_keys[i]), self._prefix_ids[i]))
+        found.sort()
+        return [i for _, i in found[:limit]]
 
     @torch.no_grad()
     def token_logprobs(
@@ -217,8 +247,24 @@ class HFLanguageModel:
 
     @torch.no_grad()
     def top_next(
-        self, sequences: Sequence[Sequence[int]], *, top_k: int, top_p: float
+        self,
+        sequences: Sequence[Sequence[int]],
+        *,
+        top_k: int,
+        top_p: float,
+        extra_ids: "Sequence[Sequence[int]] | None" = None,
+        extra_keep: int = 0,
     ) -> list[TopK]:
+        """Truncated next-token distributions, plus any tokens asked for.
+
+        ``extra_ids`` carries tokens the caller wants considered whatever
+        their rank -- the words that match the keystrokes still unexplained.
+        Their log-probabilities come out of the row already computed, so
+        proposing many costs a gather rather than a forward pass, and only
+        the best ``extra_keep`` are returned. That split matters: the caller
+        cannot tell which of "h", "ha" or "hay" begins the next word, so it
+        proposes all of them and lets the model say.
+        """
         results: list[TopK | None] = [None] * len(sequences)
         for idxs in _buckets(sequences).values():
             for chunk in _chunks(idxs, self.batch_size):
@@ -240,9 +286,24 @@ class HFLanguageModel:
                 probs_l = probs.tolist()
                 for row, i in enumerate(chunk):
                     n = int(kept_l[row])
+                    ids = list(inds_l[row][:n])
+                    lps = list(vals_l[row][:n])
+                    wanted = list(extra_ids[i]) if extra_ids is not None else []
+                    seen = set(ids)
+                    wanted = [t for t in dict.fromkeys(wanted) if t not in seen]
+                    if wanted and extra_keep > 0:
+                        picked = torch.tensor(
+                            wanted, dtype=torch.long, device=self.device
+                        )
+                        scored = logprobs[row].index_select(0, picked).tolist()
+                        best = sorted(
+                            zip(wanted, scored), key=lambda kv: -kv[1]
+                        )[:extra_keep]
+                        ids.extend(t for t, _ in best)
+                        lps.extend(lp for _, lp in best)
                     results[i] = TopK(
-                        token_ids=tuple(inds_l[row][:n]),
-                        logprobs=tuple(vals_l[row][:n]),
+                        token_ids=tuple(ids),
+                        logprobs=tuple(lps),
                         kept_mass=float(sum(probs_l[row][:n])),
                     )
         missing = [i for i, r in enumerate(results) if r is None]

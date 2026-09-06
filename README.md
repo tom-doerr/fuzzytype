@@ -21,8 +21,11 @@ $ fuzzytype
 
 ## The idea
 
-You are not completing a prefix. You are *describing* the sentence you want,
-and the system works out which sentence fits your keystrokes best.
+You are not completing a prefix and you are not correcting typos. You are
+*spending fewer keystrokes*: describe the sentence you want, and the system
+works out which one fits what you typed. Omitting characters is the intended
+way to use it, so it is the cheapest thing the model charges for; typo
+tolerance is a fallback, and costs more.
 
 | You type | You get |
 | --- | --- |
@@ -33,6 +36,7 @@ and the system works out which sentence fits your keystrokes best.
 | `th wthr hs bn` | `The weather has been good this week` |
 | `aprico` | `apricots` — a word the model would never have guessed |
 | `hel` | `Hello`, `Hello everyone`, `Help` — the `l` is treated as evidence |
+| `th wthr hs bn` | `The weather has been good this week` |
 
 Every suggestion carries its probability and its **match quality**, because
 that is the signal you steer on: `exact` means it has you and you can stop
@@ -53,12 +57,22 @@ One string can be spelled by several token sequences, and those are merged
 with `logsumexp`, so a two-token and a one-token spelling of the same word
 compete as one candidate on the total probability of the string.
 
-**The channel** is a Levenshtein grid whose costs are negative
-log-probabilities of real typing errors: a substitution (cheaper between keys
-that are physically adjacent on *your* layout), a deletion (a keystroke
-nothing explains), and a skip (a character you did not type — this is what
-makes abbreviation work). Characters past what you typed are free; that is
-the prediction, not an error.
+**The channel** is an alignment grid whose costs are negative
+log-probabilities of real typing behaviour: a substitution (cheaper between
+keys physically adjacent on *your* layout), a deletion (a keystroke nothing
+explains — the dearest, because you pressed that key on purpose), and a
+**gap**, the characters you did not type.
+
+Gaps are charged per *run*, not per character, and that is the difference
+between the tool working and not. A flat per-character rate says every
+omitted letter is an independent accident, which is not how anyone
+abbreviates. Typing `helhay` for "hello how are you" drops eleven characters
+in four runs — `hel[lo ]h[ow ]a[re ]y[ou]` — which at a flat rate came to 25.3
+nats and lost to explaining the same keystrokes as three unrelated
+*substitutions* at 12.0. The real reading was literally more expensive than
+nonsense. With an affine gap (2.0 to open, 0.35 to continue) it costs 8.1 and
+wins. Characters past what you typed stay free; that is the prediction, not
+an error.
 
 **The posterior drives the search, not just the ranking.** Extending a path
 can only lower the prior and can only raise the channel's cost floor, so
@@ -68,7 +82,7 @@ that disagree with your keystrokes are abandoned after one token, branches
 that agree are decoded many tokens deep. The unpromising strings are never
 decoded at all.
 
-### Four things that were not obvious
+### Five things that were not obvious
 
 Each of these was a bug found by measurement, and each is documented at the
 code that fixes it.
@@ -99,6 +113,13 @@ That is an artifact of an unnatural token split, not a statement about
 apricots, so each finished candidate is re-priced under its own tokenization
 and merged in.
 
+**A prefix lookup must order the whole range, not the first slice of it.**
+Thousands of tokens begin with `h`, so taking the first 512 alphabetically and
+*then* preferring short ones lands the cut somewhere in `hab…` — `how` is
+never even proposed, and abbreviation silently dies after the first word.
+The ordering has to be applied to the entire range, which is why short
+prefixes are precomputed.
+
 **A whole word is often one token the search will never propose.** Pruning
 and seeding both operate on the tree, and neither can reach a word the model
 does not offer. After the default preamble `"Hello"` scores −14.2 against
@@ -120,6 +141,23 @@ prior-spent-per-keystroke-covered. That estimate can be wrong, so it is
 confined to the heap order — pruning and stopping keep using the admissible
 bound, and a bad estimate can only cost time, never a candidate.
 
+## What it does not do yet
+
+Dense multi-word abbreviation with no separators does not reliably resolve.
+Typing `helhay` for "hello how are you" returns "Hello everyone": the channel
+scores the right sentence best (8.1 against 9.0), the vocabulary proposes
+`How` at rank **1 of 957** at the right word boundary, and the node
+`" Hello, how"` is genuinely built — it is simply never *expanded*, because
+the frontier holds tens of thousands of nodes and only ~960 expansions
+happen. Narrowing the search to 4,000 nodes does not fix it either, so the
+cause is the priority ordering rather than the width: best-first on a joint
+prior structurally prefers breadth, and four words deep is a long way down.
+
+Separating the fragments (`gt bck`, `th wthr hs bn`) works well, because each
+space anchors a word. The fix for the dense case is a coverage-stratified
+beam — keeping a beam per number of keystrokes explained, rather than one
+global priority queue.
+
 ## Performance
 
 Measured on a DGX Spark (GB10), `Qwen/Qwen3.5-0.8B-Base` in bf16:
@@ -127,12 +165,18 @@ Measured on a DGX Spark (GB10), `Qwen/Qwen3.5-0.8B-Base` in bf16:
 | | |
 | --- | --- |
 | keystroke → updated ranking | **~5 ms** typical, ~16 ms worst case (pure Python, no GPU) |
-| background decode of a new pool | ~1.7–3 s, 130–190 candidates |
+| background decode of a new pool | ~2–15 s, 150–500 candidates, published as it goes |
 | model load | ~20 s, once |
 
 Re-ranking is `O(pool × query length × candidate length)`, so the worst case is
 a long query against a full pool of sentence-length candidates — still inside a
 single frame.
+
+Decoding runs long on purpose — more rounds means more and longer phrases —
+so results are **published as they are found** rather than at the end, and the
+status line shows the search working. It is also interruptible: a keystroke
+the current pool cannot explain abandons a decode that is already out of date
+rather than queueing behind it.
 
 The two clocks are why the architecture looks the way it does. Every
 keystroke re-ranks a **cached pool** — the prior is already known per
@@ -183,7 +227,7 @@ Press `f1` in the TUI for the keys.
 python -m pytest
 ```
 
-108 tests, no GPU and no download: the search runs against a deterministic fake
+115 tests, no GPU and no download: the search runs against a deterministic fake
 model with a handful of string "tokens" and an explicit probability table,
 which is what makes it possible to assert that three spellings of `"cat"` sum
 to exactly 0.7 and that a pruned branch was never *explored* rather than

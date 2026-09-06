@@ -58,8 +58,8 @@ def _add_common(parser: argparse.ArgumentParser, *, suppress: bool = False) -> N
     parser.add_argument(
         "--max-rounds",
         type=int,
-        default=default(12),
-        help="batched forward passes per decode; the wall-clock lever",
+        default=default(40),
+        help="batched forward passes per decode; more means more phrases",
     )
     parser.add_argument(
         "--child-top-k",

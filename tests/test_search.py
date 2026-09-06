@@ -76,26 +76,34 @@ def test_keystrokes_reorder_the_candidates():
 def test_a_branch_that_cannot_explain_the_keystrokes_is_never_decoded():
     """Pruning must stop exploration, not merely filter the results.
 
-    The observable difference is how much the search *asked the model*: a
-    hopeless query has to expand strictly fewer states than no query at all,
-    and has to run out of frontier rather than out of rounds.
-
-    The query has to be reasonably long for this to bite at all. Any
-    candidate can be "explained" by simply deleting every keystroke, which
-    costs ``len(query) * delete`` no matter how wrong it is -- so a branch is
-    only ever abandoned once that fallback also exceeds the budget.
+    The budget here is deliberately strict. With the shipped costs a gap is
+    cheap by design -- that is the whole point of the tool -- so the "explain
+    nothing and skip the entire candidate" alignment stays affordable for a
+    long time and the channel prunes little. The mechanism still has to work
+    when the budget does bind, and this pins that.
     """
+    strict = ChannelCosts(budget_base=1.0, budget_per_char=0.0)
     config = PredictConfig(k=20, max_rounds=8)
+
     idle_lm = long_lm(CONTEXT)
-    predict(idle_lm, CONTEXT, "", config, COSTS)
+    predict(idle_lm, CONTEXT, "", config, strict)
 
     dead_lm = long_lm(CONTEXT)
-    candidates, stats = predict(dead_lm, CONTEXT, "zzzzzz", config, COSTS)
+    candidates, stats = predict(dead_lm, CONTEXT, "zzz", config, strict)
 
     assert stats.pruned_by_channel > 0
     assert not candidates
     assert stats.exhausted, "the frontier should die, not hit the round limit"
     assert len(dead_lm.seen) < len(idle_lm.seen)
+
+
+def test_a_hopeless_query_yields_nothing_even_when_it_is_explored():
+    """With cheap gaps the branch may survive; the budget still rejects it."""
+    lm = long_lm(CONTEXT)
+    candidates, _ = predict(
+        lm, CONTEXT, "zzzzzz", PredictConfig(k=20, max_rounds=8), COSTS
+    )
+    assert not candidates
 
 
 def test_emission_key_drops_the_terminator_and_fires_once():
@@ -156,18 +164,34 @@ def test_a_word_outside_the_top_k_is_reachable_through_the_vocabulary():
     and adding the "l" made it *worse*, because the letter could only be
     charged as a slip.
     """
-    config = PredictConfig(k=20, max_rounds=6, child_top_k=2)
-
+    # With every vocabulary route switched off, the top-k hides the word.
+    blind_config = PredictConfig(
+        k=20, max_rounds=6, child_top_k=2, seed_query=False,
+        boundary_vocab_top=0,
+    )
     blind = prefix_lm(CONTEXT)
-    found, _ = predict(blind, CONTEXT, "cart", config, COSTS)
+    found, _ = predict(blind, CONTEXT, "cart", blind_config, COSTS)
     assert "cart" not in {c.text for c in found}, "top-k should hide it"
 
     seeing = prefix_lm(CONTEXT)
     found, stats = predict(
-        seeing, CONTEXT, "cart", config, COSTS, seeds=[" cart"]
+        seeing, CONTEXT, "cart",
+        PredictConfig(k=20, max_rounds=6, child_top_k=2), COSTS,
+        seeds=[" cart"],
     )
     assert "cart" in {c.text for c in found}
     assert stats.seeded >= 1
+
+
+def test_the_vocabulary_reaches_it_even_without_an_explicit_seed():
+    """Word boundaries re-anchor on their own, which is what carries an
+    abbreviation past its first word."""
+    lm = prefix_lm(CONTEXT)
+    found, _ = predict(
+        lm, CONTEXT, "cart",
+        PredictConfig(k=20, max_rounds=6, child_top_k=2), COSTS,
+    )
+    assert "cart" in {c.text for c in found}
 
 
 def test_the_vocabulary_seed_carries_the_model_s_own_probability():
@@ -179,3 +203,57 @@ def test_the_vocabulary_seed_carries_the_model_s_own_probability():
     cart = next(c for c in found if c.text == "cart")
     # 0.05 for " cart" then 1.0 for the terminator -- not an assumed prior.
     assert math.exp(cart.logprob) == pytest.approx(0.05)
+
+
+def _node_for(text, query, costs, logprob=-5.0):
+    """Build the search's internal node for a candidate text, as _grow would."""
+    from fuzzytype.channel import grid_values, initial_column, push_candidate_char
+    from fuzzytype.search import _Node
+
+    column = initial_column(len(query), costs)
+    best, consumed = grid_values(column)[-1], 0
+    m = len(query)
+    for offset, ch in enumerate(text, start=1):
+        column = push_candidate_char(column, query, ch, costs)
+        full = min(column[0][m], column[1][m])
+        if full < best:
+            best, consumed = full, offset
+    return _Node(
+        tokens=(), logprob=logprob, data=b"", text=text,
+        column=column, best_cost=best, best_consumed=consumed,
+    )
+
+
+def test_priority_scores_cost_and_remaining_work_together():
+    """Guards the regression that cost "th wthr hs bn" all but four candidates.
+
+    Once gaps became cheap, the cheapest partial alignment of almost any node
+    was "open one gap and explain nothing at all". A signal built by taking
+    that alignment first and *then* counting what it left unexplained
+    therefore read as the whole query almost everywhere, went constant, and
+    the search lost its sense of progress. Minimising the sum keeps a node
+    that has explained more ahead of one that has not, at equal prior and
+    equal length.
+    """
+    costs = ChannelCosts()
+    query = "cat sat"
+    for length in (4, 10, 30):
+        covering = _node_for("cat "[:length].ljust(length, "z"), query, costs)
+        unrelated = _node_for("z" * length, query, costs)
+        assert covering.priority(2.0) > unrelated.priority(2.0), length
+
+
+def test_priority_improves_as_more_of_the_query_is_explained():
+    costs = ChannelCosts()
+    query = "cat sat"
+    scores = [
+        _node_for(text, query, costs).priority(2.0)
+        for text in ("c", "ca", "cat", "cat s", "cat sat")
+    ]
+    assert scores == sorted(scores), scores
+
+
+def test_priority_still_reduces_to_the_bound_without_a_penalty():
+    costs = ChannelCosts()
+    node = _node_for("cat sat on", "cat sat", costs)
+    assert node.priority(0.0) == pytest.approx(node.bound())

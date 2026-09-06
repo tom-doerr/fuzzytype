@@ -18,6 +18,7 @@ can start typing during the twenty seconds it takes.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 from rich.text import Text
@@ -100,6 +101,10 @@ add a letter, or delete one that was a typo.
 _LENGTH_BONUSES = (0.0, 1.5, 3.0)
 _LENGTH_LABELS = ("words", "phrases", "sentences")
 
+#: Animated while the model is decoding, so it is obvious that more
+#: suggestions are still on their way rather than the list being final.
+_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
 
 def quality_label(cost: float) -> str:
     """Plain words for a channel cost, so the typist can act on it."""
@@ -165,8 +170,12 @@ class FuzzyTypeApp(App):
         self._suggestions: list[Suggestion] = []
         self._decoding = False
         self._decode_wanted = False
+        #: Set to abandon the running decode. A keystroke the current pool
+        #: cannot explain matters more than finishing a stale search.
+        self._abandon = threading.Event()
         # Start the cycle where the configuration already is, so ctrl+s moves
         # away from the user's chosen default rather than resetting it.
+        self._tick = 0
         self._bonus_index = min(
             range(len(_LENGTH_BONUSES)),
             key=lambda i: abs(_LENGTH_BONUSES[i] - engine.config.length_bonus),
@@ -182,6 +191,7 @@ class FuzzyTypeApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.set_interval(0.1, self._tick_spinner)
         table = self.query_one("#suggestions", DataTable)
         table.add_columns("#", "P(meant)", "match", "suggestion")
         # This is an input method: the app owns every key. A focusable table
@@ -194,6 +204,12 @@ class FuzzyTypeApp(App):
         else:
             self._request_decode()
         self._render()
+
+    def _tick_spinner(self) -> None:
+        """Advance the spinner, but only repaint while something is running."""
+        if self._decoding or self._status.loading:
+            self._tick += 1
+            self._render_status()
 
     # -- background work -------------------------------------------------
     @work(thread=True, group="load")
@@ -217,25 +233,39 @@ class FuzzyTypeApp(App):
         self._render()
 
     def _request_decode(self) -> None:
-        """Ask for a fresh pool, coalescing requests so the GPU sees one at a time."""
+        """Ask for a fresh pool, one at a time, abandoning anything stale."""
         if self._status.loading or self._status.error:
             return
         if self._decoding:
+            # Do not queue behind a search whose answer is already out of
+            # date -- tell it to stop and start again from the new query.
             self._decode_wanted = True
+            self._abandon.set()
             return
         self._decoding = True
+        self._abandon.clear()
         self._status.decoding = True
+        self._status.stats = None
         self._decode(self.query)
         self._render()
 
     @work(thread=True, group="decode")
     def _decode(self, query: str) -> None:
         try:
-            stats = self.engine.refresh(query)
+            stats = self.engine.refresh(
+                query,
+                on_partial=lambda st: self.call_from_thread(self._decode_partial, st),
+                should_stop=self._abandon.is_set,
+            )
         except Exception as exc:
             self.call_from_thread(self._decode_failed, str(exc))
             return
         self.call_from_thread(self._decode_done, stats)
+
+    def _decode_partial(self, stats: PredictStats) -> None:
+        """A batch of new suggestions arrived while the search continues."""
+        self._status.stats = stats
+        self._render()
 
     def _decode_done(self, stats: PredictStats) -> None:
         self._decoding = False
@@ -359,26 +389,41 @@ class FuzzyTypeApp(App):
             table.move_cursor(row=self.selected)
 
     def _render_status(self) -> None:
-        parts: list[str] = []
-        if self._status.error:
-            parts.append(f"error: {self._status.error}")
-        elif self._status.loading:
-            parts.append("loading model... (you can type already)")
-        elif self._status.decoding:
-            parts.append("decoding...")
-        else:
-            parts.append("ready")
+        self.query_one("#status", Static).update(self._status_line())
+
+    def _status_line(self) -> Text:
+        """The state line. The typist needs to know whether more is coming."""
         stats = self._status.stats
-        if stats is not None:
-            parts.append(
-                f"pool {len(self.engine.pool)} of {stats.distinct} "
-                f"in {stats.seconds_total:.1f}s"
+        line = Text()
+        if self._status.error:
+            line.append(f"error: {self._status.error}", style="bold red")
+        elif self._status.loading:
+            line.append("● loading model", style="bold yellow")
+            line.append("  (you can type already)", style="dim")
+        elif self._status.decoding:
+            rounds = stats.rounds if stats else 0
+            total = self.engine.predict_config.max_rounds
+            line.append(
+                f"{_SPINNER[self._tick % len(_SPINNER)]} thinking",
+                style="bold cyan",
             )
-        parts.append(f"prefer {_LENGTH_LABELS[self._bonus_index]}")
+            line.append(f" {rounds}/{total}", style="cyan")
+            if stats is not None:
+                line.append(f"  {stats.distinct} found so far", style="dim")
+        else:
+            line.append("✓ done", style="bold green")
+            if stats is not None:
+                line.append(
+                    f"  {stats.distinct} phrases in {stats.seconds_total:.1f}s",
+                    style="dim",
+                )
+        line.append(
+            f"   |   prefer {_LENGTH_LABELS[self._bonus_index]}", style="dim"
+        )
         if self._suggestions:
-            parts.append(f"coverage {self._status.coverage:.0%}")
-        parts.append("f1 help")
-        self.query_one("#status", Static).update(Text("  |  ".join(parts), style="dim"))
+            line.append(f"   |   coverage {self._status.coverage:.0%}", style="dim")
+        line.append("   |   f1 help", style="dim")
+        return line
 
 
 def _bar_style(probability: float) -> str:

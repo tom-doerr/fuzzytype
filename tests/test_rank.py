@@ -111,6 +111,12 @@ def test_length_credit_is_off_when_the_coefficient_is_zero():
     assert length_credit("a long candidate", 0.0) == 0.0
 
 
-def test_an_unexplained_keystroke_costs_more_than_an_omitted_one():
-    """Adding a letter is deliberate; leaving one out is laziness."""
-    assert COSTS.delete > COSTS.skip
+def test_typing_less_is_cheaper_than_typing_wrong():
+    """The tool is for fewer keystrokes first, typo tolerance second.
+
+    Omitting characters is the intended way to use it, so it must be the
+    cheapest thing a typist can do; a keystroke the candidate cannot account
+    for is the most expensive.
+    """
+    assert COSTS.skip_open < COSTS.substitute < COSTS.delete
+    assert COSTS.skip_extend < COSTS.skip_open

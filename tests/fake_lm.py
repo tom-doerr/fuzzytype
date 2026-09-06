@@ -57,9 +57,9 @@ class FakeLM:
             raise AssertionError("sequence does not start with the context")
         return self._key(sequence[len(self.context) :])
 
-    def top_next(self, sequences, *, top_k, top_p):
+    def top_next(self, sequences, *, top_k, top_p, extra_ids=None, extra_keep=0):
         results = []
-        for seq in sequences:
+        for index, seq in enumerate(sequences):
             state = self._state(seq)
             self.seen.append(state)
             dist = self.table.get(state)
@@ -73,10 +73,25 @@ class FakeLM:
                     break
                 kept.append((tok, prob))
                 before += prob
+            chosen = {self.ids[t] for t, _ in kept}
+            token_ids = [self.ids[t] for t, _ in kept]
+            logprobs = [math.log(p) for _, p in kept]
+            proposed = []
+            for tid in (extra_ids[index] if extra_ids is not None else ()):
+                if tid in chosen:
+                    continue
+                probability = dist.get(self.vocab[tid], 0.0)
+                if probability > 0.0:
+                    proposed.append((tid, math.log(probability)))
+            proposed.sort(key=lambda kv: -kv[1])
+            for tid, lp in proposed[:extra_keep]:
+                chosen.add(tid)
+                token_ids.append(tid)
+                logprobs.append(lp)
             results.append(
                 TopK(
-                    token_ids=tuple(self.ids[t] for t, _ in kept),
-                    logprobs=tuple(math.log(p) for _, p in kept),
+                    token_ids=tuple(token_ids),
+                    logprobs=tuple(logprobs),
                     kept_mass=sum(p for _, p in kept),
                 )
             )

@@ -8,6 +8,7 @@ import pytest
 
 from fuzzytype.channel import (
     ChannelCosts,
+    grid_values,
     initial_column,
     initial_row,
     match,
@@ -30,9 +31,38 @@ def test_nothing_typed_costs_nothing():
     assert match("", "anything at all", COSTS).cost == 0.0
 
 
-def test_abbreviation_costs_one_skip_per_omitted_character():
-    # "wte" -> "write" leaves out "r" and "i".
-    assert match("wte", "write", COSTS).cost == pytest.approx(2 * COSTS.skip)
+def test_abbreviation_is_charged_per_gap_not_per_character():
+    """Leaving out a run of letters is one decision, not several.
+
+    "wte" -> "write" omits "r" and "i" in a single run, so it costs one gap
+    opened plus one extra character, not two independent errors.
+    """
+    assert match("wte", "write", COSTS).cost == pytest.approx(
+        COSTS.skip_open + COSTS.skip_extend
+    )
+
+
+def test_a_long_omission_costs_little_more_than_a_short_one():
+    """The point of the whole design: abbreviating harder stays affordable."""
+    short = match("ab", "axb", COSTS).cost
+    long = match("ab", "axxxxxxxxb", COSTS).cost
+    assert long < short + 1.5 * COSTS.skip_open
+
+
+def test_a_real_abbreviation_beats_a_coincidence():
+    """The measured case that forced affine gaps.
+
+    Typing "helhay" for "hello how are you" drops eleven characters in four
+    runs. Charged per character that came to 25.3 nats and lost to explaining
+    the keystrokes as three unrelated substitutions -- so "Here you go" ranked
+    above the sentence actually meant.
+    """
+    near = ChannelCosts.for_layout("colemak-dh")
+    meant = match("helhay", "hello how are you", near)
+    coincidence = match("helhay", "Here you go", near)
+    assert meant.cost < coincidence.cost
+    # ...and it is read as the real alignment, not as a truncated prefix.
+    assert meant.consumed > len("hello ")
 
 
 def test_a_spurious_keystroke_costs_a_deletion():
@@ -63,19 +93,19 @@ def test_budget_grows_with_the_query():
 
 def _full_grid_by_columns(query, candidate, costs):
     column = initial_column(len(query), costs)
-    grid = [column]
+    grid = [grid_values(column)]
     for ch in candidate:
         column = push_candidate_char(column, query, ch, costs)
-        grid.append(column)
+        grid.append(grid_values(column))
     return grid
 
 
 def _full_grid_by_rows(query, candidate, costs):
     row = initial_row(len(candidate), costs)
-    rows = [row]
+    rows = [grid_values(row)]
     for ch in query:
         row = push_query_char(row, candidate, ch, costs)
-        rows.append(row)
+        rows.append(grid_values(row))
     # transpose to the same shape the column walk produces
     return [tuple(r[j] for r in rows) for j in range(len(candidate) + 1)]
 

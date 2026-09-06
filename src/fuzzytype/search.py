@@ -47,7 +47,13 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from .channel import ChannelCosts, initial_column, push_candidate_char
+from .channel import (
+    ChannelCosts,
+    Grid,
+    grid_values,
+    initial_column,
+    push_candidate_char,
+)
 from .lm import LanguageModel
 
 __all__ = ["Candidate", "PredictConfig", "PredictStats", "predict"]
@@ -117,8 +123,13 @@ class PredictConfig:
     child_top_k: int = 64
     child_top_p: float = 0.9995
     batch_size: int = 24
-    #: The wall-clock lever: each round is one batched forward pass.
-    max_rounds: int = 12
+    #: How long to keep looking. Each round is one batched forward pass, and
+    #: more rounds means more and longer phrases. It can afford to be generous
+    #: because results are published as they are found and the search can be
+    #: interrupted the moment they stop being wanted.
+    max_rounds: int = 40
+    #: Publish the ranking so far every this many rounds.
+    publish_every: int = 3
     max_expansions: int = 4000
     #: Absolute backstop only. A *prior* floor fights the whole design -- a
     #: rare word has a low prior and a perfect channel match, which is exactly
@@ -133,6 +144,12 @@ class PredictConfig:
     #: regardless of the first number, so it can afford to be generous.
     seed_vocab_limit: int = 512
     seed_vocab_top: int = 24
+    #: At every word boundary, how many vocabulary entries matching the
+    #: *still unexplained* keystrokes to propose, and how many of those the
+    #: model's own ranking keeps. This is what makes abbreviation work past
+    #: the first word.
+    boundary_vocab_limit: int = 512
+    boundary_vocab_top: int = 16
     #: Re-price this many finished candidates under their canonical
     #: tokenization. 0 disables it.
     rescore_top: int = 24
@@ -175,6 +192,9 @@ class PredictStats:
     frontier_bound: float = NEG_INF
     exhausted: bool = False
     complete_top_k: bool = False
+    #: Abandoned early because the caller asked, normally because a keystroke
+    #: made this decode out of date.
+    interrupted: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -194,6 +214,7 @@ class PredictStats:
             "frontier_bound": self.frontier_bound,
             "exhausted": self.exhausted,
             "complete_top_k": self.complete_top_k,
+            "interrupted": self.interrupted,
         }
 
 
@@ -211,16 +232,21 @@ class _Node:
     logprob: float
     data: bytes
     text: str
-    column: tuple[float, ...]
+    column: Grid
     best_cost: float  # best match achieved at any prefix of this text
     best_consumed: int
 
+    @property
+    def query_len(self) -> int:
+        return len(self.column[0]) - 1
+
     def _column_min(self) -> tuple[float, int]:
         """The cheapest partial explanation, and how many keystrokes it covers."""
-        best_value, best_index = self.column[0], 0
-        for i in range(1, len(self.column)):
-            if self.column[i] < best_value:
-                best_value, best_index = self.column[i], i
+        values = grid_values(self.column)
+        best_value, best_index = values[0], 0
+        for i in range(1, len(values)):
+            if values[i] < best_value:
+                best_value, best_index = values[i], i
         return best_value, best_index
 
     def cost_bound(self) -> float:
@@ -244,33 +270,53 @@ class _Node:
         return self.logprob - self.cost_bound()
 
     def keystrokes_owed(self) -> int:
-        """Keystrokes this path has not explained yet."""
+        """Keystrokes not explained by the cheapest partial alignment.
+
+        Reported for diagnostics only. On its own it is a poor signal once
+        gaps are cheap -- see :meth:`priority`.
+        """
         column_min, covered = self._column_min()
         if self.best_cost <= column_min:
-            return 0  # some prefix already explains everything typed
-        return (len(self.column) - 1) - covered
+            return 0
+        return self.query_len - covered
 
     def priority(self, progress_penalty: float) -> float:
         """Search order. Deliberately *not* the sound bound.
 
-        Pure best-first on ``bound()`` collapses to breadth-first here,
-        because extending a path can only lower its score -- so a one-token
-        path like "I" always outranks the ten-token path that actually
-        answers the query. Against "I will gt bck" that is fatal: the channel
-        makes a candidate explain *every* keystroke, so short candidates are
-        never emitted at all and the search returns nothing while looking
-        busy.
+        Pure best-first on ``bound()`` collapses to breadth-first, because
+        extending a path can only lower its score -- so a one-token path like
+        "I" always outranks the ten-token path that actually answers the
+        query. Against "I will gt bck" that is fatal: the channel makes a
+        candidate explain *every* keystroke, so short candidates are never
+        emitted at all and the search returns nothing while looking busy.
 
-        The fix is to charge a node for the prior it still has to spend --
-        roughly ``progress_penalty`` nats per keystroke still owed -- so nodes
-        compete on prior-per-keystroke-covered instead of raw prior. That
-        estimate can be wrong, which is exactly why it is confined to the heap
+        So a node is ordered by cost already incurred *plus* an estimate of
+        what it still owes: ``progress_penalty`` nats for each keystroke not
+        yet explained, minimised over every alignment state.
+
+        Minimising the sum is the whole trick, and taking the cheapest
+        alignment first and penalising it afterwards is not the same thing.
+        Once gaps became cheap, the cheapest partial alignment of nearly every
+        node was "open one gap and explain nothing at all", so the count of
+        unexplained keystrokes read as the full query everywhere, the estimate
+        became a constant, and the search lost its sense of progress
+        completely -- "th wthr hs bn" fell from 146 candidates to 4. Scored
+        together, explaining nothing costs its 2 nats plus the whole query's
+        worth of penalty, and a real seven-keystroke alignment wins.
+
+        The estimate can be wrong, which is why it is confined to the heap
         order: pruning and stopping keep using the admissible ``bound()``, so
-        a bad estimate can slow the search down but cannot make it drop a
-        candidate it should have kept. Setting the penalty to 0 restores plain
-        A*.
+        a bad estimate can slow the search down but never make it drop a
+        candidate it should have kept. A penalty of 0 restores plain A*.
         """
-        return self.bound() - progress_penalty * self.keystrokes_owed()
+        values = grid_values(self.column)
+        last = len(values) - 1
+        estimate = self.best_cost  # already explains everything typed
+        for covered, cost in enumerate(values):
+            owed = cost + progress_penalty * (last - covered)
+            if owed < estimate:
+                estimate = owed
+        return self.logprob - estimate
 
 
 @dataclass
@@ -346,7 +392,7 @@ def _emission_key(parent_text: str, text: str) -> str | None:
 
 def _grow(
     parent: _Node, text: str, query: str, costs: ChannelCosts
-) -> tuple[tuple[float, ...], float, int]:
+) -> tuple[Grid, float, int]:
     """Carry the channel grid forward from ``parent`` to the longer ``text``."""
     old = parent.text.lstrip()
     new = text.lstrip()
@@ -358,13 +404,15 @@ def _grow(
         # BPE can do when a token completes a character. Rebuild rather than
         # let the grid describe a different string than the text.
         column = initial_column(len(query), costs)
-        best, consumed = column[-1], 0
+        best, consumed = grid_values(column)[-1], 0
         added, base = new, 0
     m = len(query)
     for offset, ch in enumerate(added, start=1):
         column = push_candidate_char(column, query, ch, costs)
-        if column[m] < best:
-            best, consumed = column[m], base + offset
+        # The cost of explaining *every* keystroke with the text so far.
+        full = min(column[0][m], column[1][m])
+        if full < best:
+            best, consumed = full, base + offset
     return column, best, consumed
 
 
@@ -385,6 +433,40 @@ def _child(
         tokens=tokens, logprob=logprob, data=data, text=text,
         column=column, best_cost=best, best_consumed=consumed,
     )
+
+
+def _boundary_ids(
+    lm: LanguageModel, node: _Node, query: str, limit: int
+) -> tuple[int, ...]:
+    """Words that could start where the keystrokes have not been explained yet.
+
+    Anchoring only the first word is not enough. "helhay" means "hello how are
+    you": seeding gets the search to "Hello", and then " how are you" has to
+    beat a one-token " everyone" on prior three times over, which it never
+    does -- so the abbreviation dies one word in.
+
+    At each word boundary the keystrokes that remain unexplained are looked up
+    in the vocabulary again, and the matches are kept in play regardless of
+    their rank. An abbreviation is a sequence of word-initial fragments, so
+    this simply re-anchors on each of them in turn. It costs a bisect per node
+    and a gather per row, not a forward pass.
+    """
+    if not query:
+        return ()
+    if node.text and node.text[-1] not in " \t\n":
+        return ()  # mid-word: the next token continues it, not a new word
+    remaining = query[node._column_min()[1] :].lstrip()
+    if not remaining:
+        return ()
+    # The fragment length is unknowable here: in "helhay" the "h" of "hay" is
+    # a whole word ("how"), yet "hay" is also a word. Guessing the longest
+    # match picks "hay" and loses "how" for good. So every plausible fragment
+    # is proposed and the model ranks them -- scoring a proposal is a gather
+    # from a row already computed, and only the best few become children.
+    ids: list[int] = []
+    for cut in range(1, min(len(remaining), 4) + 1):
+        ids.extend(lm.tokens_with_prefix(remaining[:cut], limit))
+    return tuple(dict.fromkeys(ids))
 
 
 def _top_k_complete(
@@ -451,7 +533,18 @@ def _vocabulary_nodes(
         return []
     wanted, ids = [s.strip().lower() for s in seeds if s.strip()], []
     for text in dict.fromkeys(wanted):
-        ids.extend(lm.tokens_with_prefix(text, limit))
+        # Back off to the longest prefix that is actually the start of a word.
+        # Whole keystrokes rarely are once abbreviation gets going: "helhay"
+        # means "hello how are you" and begins no token at all, while its
+        # first three characters begin "hello", "help" and "held". Anchoring
+        # on the first word is what gives the search somewhere real to start;
+        # the channel then explains the rest of the keystrokes as the cheap
+        # gaps they are.
+        for cut in range(len(text), 1, -1):
+            found = lm.tokens_with_prefix(text[:cut], limit)
+            if found:
+                ids.extend(found)
+                break
     ids = list(dict.fromkeys(ids))
     if not ids:
         return []
@@ -514,6 +607,19 @@ def _rescore_canonical(
     return len(items)
 
 
+def _collect(merged: dict[str, _Merged], k: int) -> list[Candidate]:
+    """Rank what has been found so far."""
+    candidates = [
+        Candidate(
+            text=key, raw=m.raw, logprob=m.total, cost=m.cost,
+            consumed=m.consumed, n_paths=m.n_paths, tokens=m.tokens,
+        )
+        for key, m in merged.items()
+    ]
+    candidates.sort(key=lambda c: (-c.score, c.text))
+    return candidates[:k]
+
+
 def predict(
     lm: LanguageModel,
     prefix_ids: Sequence[int],
@@ -522,6 +628,8 @@ def predict(
     costs: ChannelCosts | None = None,
     on_progress: Callable[[PredictStats], None] | None = None,
     seeds: Sequence[str] = (),
+    on_candidates: Callable[[list[Candidate], PredictStats], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[list[Candidate], PredictStats]:
     """Rank the strings the typist most likely meant.
 
@@ -531,6 +639,14 @@ def predict(
     ``seeds`` are literal texts to insert as starting paths -- normally the
     keystrokes themselves, supplied by the caller because only it knows
     whether a leading space belongs there.
+
+    ``on_candidates`` receives the ranking so far every
+    ``PredictConfig.publish_every`` rounds. Searching longer finds more and
+    better phrases, but a typist should not have to wait for the end of it to
+    see anything, so results are published as they are found. ``should_stop``
+    is polled once per round and abandons the search: a keystroke that the
+    current pool cannot explain matters more than finishing a decode that is
+    already out of date.
     """
     started = time.monotonic()
     cfg = config or PredictConfig()
@@ -544,7 +660,8 @@ def predict(
     root_column = initial_column(len(query), ch_costs)
     root = _Node(
         tokens=(), logprob=0.0, data=b"", text="",
-        column=root_column, best_cost=root_column[-1], best_consumed=0,
+        column=root_column, best_cost=grid_values(root_column)[-1],
+        best_consumed=0,
     )
     tiebreak = 0
     penalty = cfg.progress_penalty
@@ -574,6 +691,9 @@ def predict(
     while frontier and stats.rounds < cfg.max_rounds:
         if stats.expansions >= cfg.max_expansions:
             break
+        if should_stop is not None and should_stop():
+            stats.interrupted = True
+            break
         # The heap is ordered by priority, which is not a bound; the stopping
         # proof needs the best true bound still in the frontier.
         best_bound = max(node.bound() for _, _, node in frontier)
@@ -585,11 +705,17 @@ def predict(
         while frontier and len(batch) < cfg.batch_size:
             batch.append(heapq.heappop(frontier)[2])
 
+        extras = [
+            _boundary_ids(lm, node, query, cfg.boundary_vocab_limit)
+            for node in batch
+        ]
         model_started = time.monotonic()
         tops = lm.top_next(
             [prefix + n.tokens for n in batch],
             top_k=cfg.child_top_k,
             top_p=cfg.child_top_p,
+            extra_ids=extras,
+            extra_keep=cfg.boundary_vocab_top,
         )
         stats.seconds_model += time.monotonic() - model_started
         stats.rounds += 1
@@ -662,6 +788,9 @@ def predict(
         stats.distinct = len(merged)
         if on_progress is not None:
             on_progress(stats)
+        if on_candidates is not None and stats.rounds % cfg.publish_every == 0:
+            stats.seconds_total = time.monotonic() - started
+            on_candidates(_collect(merged, cfg.k), stats)
 
     stats.exhausted = not frontier
     stats.frontier_bound = (
@@ -672,14 +801,6 @@ def predict(
     stats.rescored = _rescore_canonical(lm, prefix, merged, cfg.rescore_top)
     stats.seconds_model += time.monotonic() - model_started
 
-    candidates = [
-        Candidate(
-            text=key, raw=m.raw, logprob=m.total, cost=m.cost,
-            consumed=m.consumed, n_paths=m.n_paths, tokens=m.tokens,
-        )
-        for key, m in merged.items()
-    ]
-    candidates.sort(key=lambda c: (-c.score, c.text))
-    stats.distinct = len(candidates)
+    stats.distinct = len(merged)
     stats.seconds_total = time.monotonic() - started
-    return candidates[: cfg.k], stats
+    return _collect(merged, cfg.k), stats

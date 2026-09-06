@@ -67,9 +67,21 @@ class LanguageModel(Protocol):
         ...
 
     def top_next(
-        self, sequences: Sequence[Sequence[int]], *, top_k: int, top_p: float
+        self,
+        sequences: Sequence[Sequence[int]],
+        *,
+        top_k: int,
+        top_p: float,
+        extra_ids: Sequence[Sequence[int]] | None = None,
+        extra_keep: int = 0,
     ) -> list[TopK]:
-        """Truncated next-token distributions, one per input sequence."""
+        """Truncated next-token distributions, one per input sequence.
+
+        ``extra_ids`` proposes tokens to include whatever their rank -- the
+        words matching the keystrokes still unexplained -- of which the best
+        ``extra_keep`` are returned. Proposing is cheap and the model does
+        the choosing.
+        """
         ...
 
     def tokens_with_prefix(self, prefix: str, limit: int = 512) -> list[int]:
