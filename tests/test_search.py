@@ -257,3 +257,20 @@ def test_priority_still_reduces_to_the_bound_without_a_penalty():
     costs = ChannelCosts()
     node = _node_for("cat sat on", "cat sat", costs)
     assert node.priority(0.0) == pytest.approx(node.bound())
+
+
+def test_batched_pricing_matches_pricing_one_at_a_time():
+    """Padding a batch must not change a single number.
+
+    Continuations of different lengths share a batch, padded to the widest
+    and masked out of the sum. If the mask or the kept-slice offset were
+    wrong the totals would silently include padding, which no other test
+    would notice.
+    """
+    lm = cat_lm(CONTEXT)
+    conts = [
+        tuple(lm.encode(text)) for text in (" cat", " cat ", " car", " ca", " cart")
+    ]
+    together = lm.sequence_logprobs([(CONTEXT, c) for c in conts])
+    alone = [lm.sequence_logprobs([(CONTEXT, c)])[0] for c in conts]
+    assert together == pytest.approx(alone)

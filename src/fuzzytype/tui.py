@@ -82,6 +82,7 @@ add a letter, or delete one that was a typo.
 | `backspace` | delete a keystroke, then delete committed text |
 | `ctrl+l` | commit exactly what you typed, uncorrected |
 | `ctrl+s` | cycle how much longer sentences are preferred |
+| `ctrl+up` / `ctrl+down` (or `f3` / `f2`) | think harder or less hard -- more rounds finds more and longer phrases, and costs time |
 | `ctrl+r` | force a fresh decode |
 | `f1` | this help |
 | `ctrl+q` | quit |
@@ -104,6 +105,22 @@ _LENGTH_LABELS = ("words", "phrases", "sentences")
 #: Animated while the model is decoding, so it is obvious that more
 #: suggestions are still on their way rather than the list being final.
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+#: How hard to think, in batched forward passes per decode. Adjustable live
+#: because it is the one setting whose right value depends entirely on what
+#: is being written: a single word needs a handful of rounds, a long sentence
+#: from heavy shorthand wants all of them.
+_ROUND_STEPS = (4, 8, 12, 20, 32, 48, 80, 120)
+
+#: Spinner period, and how many of those to skip while the model loads.
+#: Repainting during the load was suspected of starving the loader thread,
+#: but measured over both orderings the same configuration varies more
+#: (18.9-21.9s) than any configuration differs from another -- the apparent
+#: effect was a cold page cache on whichever ran first. The throttle stays
+#: because a once-a-second elapsed counter is all a load needs, not because
+#: it buys time.
+_TICK_SECONDS = 0.2
+_LOADING_TICKS = 5
 
 
 def quality_label(cost: float) -> str:
@@ -154,6 +171,8 @@ class FuzzyTypeApp(App):
         ("down", "move(1)", "down"),
         ("ctrl+l", "accept_literal", "literal"),
         ("ctrl+s", "cycle_length", "length"),
+        ("ctrl+up,f3", "rounds(1)", "+think"),
+        ("ctrl+down,f2", "rounds(-1)", "-think"),
         ("ctrl+r", "force_refresh", "re-decode"),
         ("f1", "help", "help"),
         ("ctrl+q", "quit", "quit"),
@@ -191,7 +210,7 @@ class FuzzyTypeApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.set_interval(0.1, self._tick_spinner)
+        self.set_interval(_TICK_SECONDS, self._tick_spinner)
         table = self.query_one("#suggestions", DataTable)
         table.add_columns("#", "P(meant)", "match", "suggestion")
         # This is an input method: the app owns every key. A focusable table
@@ -207,9 +226,13 @@ class FuzzyTypeApp(App):
 
     def _tick_spinner(self) -> None:
         """Advance the spinner, but only repaint while something is running."""
-        if self._decoding or self._status.loading:
+        if self._decoding:
             self._tick += 1
             self._render_status()
+        elif self._status.loading:
+            self._tick += 1
+            if self._tick % _LOADING_TICKS == 0:
+                self._render_status()
 
     # -- background work -------------------------------------------------
     @work(thread=True, group="load")
@@ -248,6 +271,39 @@ class FuzzyTypeApp(App):
         self._status.stats = None
         self._decode(self.query)
         self._render()
+
+    def _request_rescore(self) -> None:
+        """Re-price the pool under the new keystrokes, one pass at a time."""
+        if self._decoding:
+            self._decode_wanted = True
+            self._abandon.set()
+            return
+        self._decoding = True
+        self._abandon.clear()
+        self._status.decoding = True
+        self._rescore(self.query)
+        self._render()
+
+    @work(thread=True, group="decode")
+    def _rescore(self, query: str) -> None:
+        try:
+            self.engine.rescore(query)
+        except Exception as exc:
+            self.call_from_thread(self._decode_failed, str(exc))
+            return
+        self.call_from_thread(self._rescore_done)
+
+    def _rescore_done(self) -> None:
+        self._decoding = False
+        self._status.decoding = False
+        self._render()
+        # Nothing new was discovered, only re-priced, so look for more once
+        # the typist has stopped -- interrupted again by the next keystroke.
+        if self._decode_wanted:
+            self._decode_wanted = False
+            self._after_typing()
+        else:
+            self._request_decode()
 
     @work(thread=True, group="decode")
     def _decode(self, query: str) -> None:
@@ -302,9 +358,19 @@ class FuzzyTypeApp(App):
     def _after_typing(self) -> None:
         self.selected = 0
         self._render()
-        # The pool is only re-decoded when it stops explaining the keystrokes,
-        # so ordinary typing costs no GPU at all.
-        if not self._status.loading and self.engine.needs_refresh(self.query):
+        if self._status.loading:
+            return
+        if self.engine.config.mode == "prompt" and self.engine.pool:
+            # Prompt mode's priors are conditioned on the keystrokes, so a new
+            # character invalidates the numbers but not the strings. Re-pricing
+            # what is already known is far cheaper than searching for it again
+            # -- measured at 2.7x -- and a decode follows once the typist
+            # pauses, to keep finding new phrases.
+            self._request_rescore()
+            return
+        # Channel mode's priors do not depend on the keystrokes, so the pool
+        # only has to be extended when it stops explaining them.
+        if self.engine.needs_refresh(self.query):
             self._request_decode()
 
     # -- actions ---------------------------------------------------------
@@ -335,12 +401,41 @@ class FuzzyTypeApp(App):
         self._request_decode()
         self._render()
 
+    def action_rounds(self, delta: int) -> None:
+        """Spend more or less time searching, from now on.
+
+        Applies to the next decode and starts one immediately, so the effect
+        is visible rather than deferred to the next keystroke.
+        """
+        config = self.engine.predict_config
+        steps = list(_ROUND_STEPS)
+        current = min(range(len(steps)), key=lambda i: abs(steps[i] - config.max_rounds))
+        index = max(0, min(len(steps) - 1, current + delta))
+        if steps[index] == config.max_rounds:
+            return
+        config.max_rounds = steps[index]
+        self._request_decode()
+        self._render()
+
     def action_cycle_length(self) -> None:
         self._bonus_index = (self._bonus_index + 1) % len(_LENGTH_BONUSES)
         self.engine.config.length_bonus = _LENGTH_BONUSES[self._bonus_index]
         self._render()
 
     def action_force_refresh(self) -> None:
+        """Decode again -- or retry the model, if loading it failed.
+
+        Worth having on this hardware: a fragmented host can refuse a CUDA
+        context, and an app whose only response is a permanent error line has
+        to be restarted for something that usually succeeds on a second try.
+        """
+        if self._status.error and self._model_loader is not None:
+            self._status.error = ""
+            self._status.loading = True
+            self._tick = 0
+            self._load_model()
+            self._render()
+            return
         self._request_decode()
 
     def action_help(self) -> None:
@@ -398,7 +493,8 @@ class FuzzyTypeApp(App):
         if self._status.error:
             line.append(f"error: {self._status.error}", style="bold red")
         elif self._status.loading:
-            line.append("● loading model", style="bold yellow")
+            waited = int(self._tick * _TICK_SECONDS)
+            line.append(f"● loading model {waited}s", style="bold yellow")
             line.append("  (you can type already)", style="dim")
         elif self._status.decoding:
             rounds = stats.rounds if stats else 0
@@ -420,6 +516,10 @@ class FuzzyTypeApp(App):
         line.append(
             f"   |   prefer {_LENGTH_LABELS[self._bonus_index]}", style="dim"
         )
+        line.append(
+            f"   |   think {self.engine.predict_config.max_rounds}", style="dim"
+        )
+        line.append(f"   |   {self.engine.config.mode}", style="dim")
         if self._suggestions:
             line.append(f"   |   coverage {self._status.coverage:.0%}", style="dim")
         line.append("   |   f1 help", style="dim")
@@ -453,7 +553,11 @@ def run_tui(args) -> int:
     engine = Engine(
         lm=None,  # filled in by the loader worker
         config=EngineConfig(
-            preamble=args.preamble, k=args.top, length_bonus=args.length_bonus
+            preamble=args.preamble,
+            k=args.top,
+            length_bonus=args.length_bonus,
+            mode=args.mode,
+            channel_assist=args.channel_assist,
         ),
         predict_config=PredictConfig(
             k=max(args.top * 20, 160),

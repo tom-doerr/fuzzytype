@@ -70,6 +70,21 @@ def _add_common(parser: argparse.ArgumentParser, *, suppress: bool = False) -> N
             "first, so it costs almost nothing and widens what is reachable"
         ),
     )
+    parser.add_argument(
+        "--mode",
+        default=default("channel"),
+        choices=("channel", "prompt"),
+        help=(
+            "channel: rank with a hand-calibrated typing model. "
+            "prompt: ask the model to expand the shorthand itself"
+        ),
+    )
+    parser.add_argument(
+        "--channel-assist",
+        action="store_true",
+        default=default(False),
+        help="in prompt mode, also score the keystrokes with the channel",
+    )
     parser.add_argument("--preamble", default=default(DEFAULT_PREAMBLE))
 
 
@@ -115,7 +130,11 @@ def _engine(args) -> Engine:
     return Engine(
         lm=lm,
         config=EngineConfig(
-            preamble=args.preamble, k=args.top, length_bonus=args.length_bonus
+            preamble=args.preamble,
+            k=args.top,
+            length_bonus=args.length_bonus,
+            mode=args.mode,
+            channel_assist=args.channel_assist,
         ),
         predict_config=PredictConfig(
             k=max(args.top * 20, 160),

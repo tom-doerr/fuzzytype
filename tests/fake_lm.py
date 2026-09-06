@@ -116,7 +116,15 @@ class FakeLM:
 
 #: A world where "cat" has three spellings, so merging can be asserted on an
 #: exact number, and where "cart" shares a prefix with it.
-CAT_VOCAB = ["<eos>", " ", ".", " cat", " ca", "t", " car", "s"]
+#: The capitalised tokens exist because the engine offers a capitalised
+#: spelling of whatever is typed as a seed, and a seed is really encoded.
+CAT_VOCAB = [
+    "<eos>", " ", ".", " cat", " ca", "t", " car", "s",
+    # Bare and capitalised letters: the engine seeds the search with what was
+    # typed, without a leading space at the start of a word and capitalised
+    # as well, and a seed is really encoded.
+    " C", "C", "c", "a", "r",
+]
 CAT_TABLE = {
     (): {" cat": 0.5, " ca": 0.2, " car": 0.3},
     (" cat",): {" ": 0.7, ".": 0.3},

@@ -13,7 +13,7 @@ from fake_lm import cat_lm
 from fuzzytype.channel import ChannelCosts
 from fuzzytype.engine import Engine, EngineConfig
 from fuzzytype.search import PredictConfig
-from fuzzytype.tui import FuzzyTypeApp, quality_label
+from fuzzytype.tui import _ROUND_STEPS, FuzzyTypeApp, quality_label
 
 CONTEXT = (1,)
 
@@ -172,3 +172,61 @@ def test_the_status_line_says_when_the_model_is_working():
     working, idle = _drive(steps)
     assert "thinking" in working
     assert "thinking" not in idle
+
+
+def test_thinking_time_is_adjustable_live():
+    """The right number of rounds depends on what is being written."""
+
+    async def steps(app, pilot):
+        start = app.engine.predict_config.max_rounds
+        await pilot.press("ctrl+up")
+        await pilot.pause()
+        more = app.engine.predict_config.max_rounds
+        await pilot.press("ctrl+down", "ctrl+down")
+        await pilot.pause()
+        return start, more, app.engine.predict_config.max_rounds
+
+    start, more, fewer = _drive(steps)
+    assert more > start
+    assert fewer < more
+
+
+def test_thinking_time_is_shown_and_clamped():
+    async def steps(app, pilot):
+        for _ in range(20):
+            await pilot.press("ctrl+down")
+        await pilot.pause()
+        low = app.engine.predict_config.max_rounds
+        for _ in range(20):
+            await pilot.press("ctrl+up")
+        await pilot.pause()
+        return low, app.engine.predict_config.max_rounds, app._status_line().plain
+
+    low, high, status = _drive(steps)
+    assert low == min(_ROUND_STEPS)
+    assert high == max(_ROUND_STEPS)
+    assert f"think {high}" in status
+
+
+def test_a_failed_model_load_can_be_retried():
+    """A refused CUDA context should not mean restarting the app."""
+    attempts = []
+
+    def failing_loader():
+        attempts.append(1)
+        raise RuntimeError("CUDA error: out of memory")
+
+    async def main():
+        app = FuzzyTypeApp(_app().engine, model_loader=failing_loader)
+        async with app.run_test() as pilot:
+            for _ in range(10):
+                await pilot.pause()
+            failed = app._status.error
+            await pilot.press("ctrl+r")
+            for _ in range(10):
+                await pilot.pause()
+            return failed, len(attempts)
+
+    failed, tries = asyncio.run(main())
+    assert "out of memory" in failed
+    assert tries >= 2, "ctrl+r should have tried the model again"

@@ -315,28 +315,48 @@ class HFLanguageModel:
     def sequence_logprobs(
         self, items: Sequence[tuple[Sequence[int], Sequence[int]]]
     ) -> list[float]:
-        """Price an explicit continuation, e.g. a seeded literal branch."""
+        """Price explicit continuations -- a seeded branch, or a whole pool.
+
+        Continuations are padded to a common length within each batch rather
+        than bucketed by length. Bucketing means one forward per distinct
+        continuation length, each with whatever few rows happen to share it;
+        padding means full batches and roughly half as many forwards. It is
+        safe because ``logits_to_keep`` counts from the end and every padded
+        row has the same total length, so the kept slice starts at the first
+        continuation token for every row alike; the padding is then masked out
+        of the sum rather than scored.
+        """
         results = [float("nan")] * len(items)
-        groups: dict[tuple[int, int], list[int]] = {}
+        groups: dict[int, list[int]] = {}
         for i, (prefix, cont) in enumerate(items):
             if not prefix:
                 raise ValueError("prefix must contain at least one token")
             if not cont:
                 raise ValueError("continuation must contain at least one token")
-            groups.setdefault((len(prefix), len(cont)), []).append(i)
+            groups.setdefault(len(prefix), []).append(i)
 
-        for (plen, clen), idxs in groups.items():
+        pad = self.eos_token_id or 0
+        for plen, idxs in groups.items():
             for chunk in _chunks(idxs, self.batch_size):
-                full = torch.tensor(
-                    [list(items[i][0]) + list(items[i][1]) for i in chunk],
-                    dtype=torch.long,
-                    device=self.device,
-                )
-                # Keeping clen+1 positions puts the slot that predicts the
-                # first continuation token at kept index 0.
-                logits = self.model(input_ids=full, logits_to_keep=clen + 1).logits
-                lp = torch.log_softmax(logits[:, :clen, :].float(), dim=-1)
+                widest = max(len(items[i][1]) for i in chunk)
+                rows = [
+                    list(items[i][0])
+                    + list(items[i][1])
+                    + [pad] * (widest - len(items[i][1]))
+                    for i in chunk
+                ]
+                full = torch.tensor(rows, dtype=torch.long, device=self.device)
+                logits = self.model(input_ids=full, logits_to_keep=widest + 1).logits
+                lp = torch.log_softmax(logits[:, :widest, :].float(), dim=-1)
                 per_token = lp.gather(-1, full[:, plen:].unsqueeze(-1)).squeeze(-1)
+                lengths = torch.tensor(
+                    [len(items[i][1]) for i in chunk], device=self.device
+                )
+                keep = (
+                    torch.arange(widest, device=self.device).unsqueeze(0)
+                    < lengths.unsqueeze(1)
+                )
+                totals = (per_token * keep).sum(dim=1).tolist()
                 for row, i in enumerate(chunk):
-                    results[i] = float(per_token[row].sum().item())
+                    results[i] = float(totals[row])
         return results

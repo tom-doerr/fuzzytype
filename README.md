@@ -43,6 +43,34 @@ that is the signal you steer on: `exact` means it has you and you can stop
 typing; `loose` means it is stretching, so add a letter — or delete one that
 was a typo.
 
+## Two modes
+
+**`--mode channel`** (default) ranks with a hand-built model of how a typist
+abbreviates — what a skipped run costs, what a wrong key costs.
+
+**`--mode prompt`** asks the language model to do the expanding instead. The
+keystrokes go into a prompt as an example of shorthand and the completion
+tree is walked after `full text:`, so candidates carry
+`P(expansion | shorthand, context)` straight from the model and nothing needs
+calibrating.
+
+Measured on the same cases, 8 rounds each:
+
+| typed | channel | prompt |
+| --- | --- | --- |
+| `brd` | bread @1, 36% | bread @1, **80%** |
+| `th wthr hs bn` | @1, 14% | @1, **41%** |
+| `gt bck` | @1, 26% | @1, 30% |
+| `hel` | Hello @1 | help @1, hello @2 |
+| `helhay` | Hello everyone | hello hay |
+
+Prompt mode is markedly more confident wherever the input is genuinely
+shorthand, and it finds more candidates per decode — at roughly 1.5× the time,
+because the prompt makes every forward pass longer. It is also less literal
+about single fragments: it reads `hel` as shorthand for `help` before `hello`,
+which is defensible but not always what you meant. The channel can be layered
+on top with `--channel-assist`.
+
 ## How it works
 
 Two log-probabilities, in nats, added:
@@ -180,9 +208,25 @@ rather than queueing behind it.
 
 The two clocks are why the architecture looks the way it does. Every
 keystroke re-ranks a **cached pool** — the prior is already known per
-candidate, so a keystroke costs one Levenshtein grid each and nothing more.
+candidate, so a keystroke costs one alignment grid each and nothing more.
 The model is only consulted again when the pool stops explaining what you are
 typing, which the channel cost detects directly.
+
+**The pool accumulates.** In channel mode a candidate's prior is
+`P(text | context)` and does not depend on the keystrokes at all, so
+everything found under an earlier query is still exactly as probable. Editing
+the query used to throw all of it away and re-derive the same phrases from
+nothing — which is what put a ceiling on how long a sentence could be built
+up. Typing `gt bck` one character at a time: **267 candidates in 16.8 s
+accumulating, against 118 in 20.3 s discarding**.
+
+**Prompt mode re-prices instead of re-searching.** Its priors *do* depend on
+the keystrokes, so a new character invalidates the numbers but not the
+strings. Pricing the known candidates against the new prompt costs **2.7×
+less than walking for them again** (10.1 s vs 27.3 s for 465 candidates), and
+it is bounded by `max_rescore` so a keystroke does not wait on a long tail
+nobody will read. Batches are padded to a common continuation length rather
+than bucketed by length, which roughly halves the number of forward passes.
 
 The batch size is a latency knob, not a throughput one: batch 24 × 64 tokens
 takes ~85 ms, batch 48 takes ~384 ms. The superlinearity is the 248k-wide
@@ -216,7 +260,8 @@ Useful options:
 | --- | --- |
 | `--layout colemak-dh\|qwerty\|none` | which keys count as neighbours when scoring a typo |
 | `--length-bonus` | how much longer candidates are preferred; saturating, 0 disables (`ctrl+s` cycles it live) |
-| `--max-rounds` | batched forward passes per decode — the wall-clock lever |
+| `--mode channel\|prompt` | rank with the typing model, or let the LM expand the shorthand |
+| `--max-rounds` | batched forward passes per decode — more rounds finds more and longer phrases (`ctrl+up` / `ctrl+down` adjusts it live) |
 | `--max-chars` | longest candidate to decode |
 
 Press `f1` in the TUI for the keys.
@@ -227,7 +272,7 @@ Press `f1` in the TUI for the keys.
 python -m pytest
 ```
 
-115 tests, no GPU and no download: the search runs against a deterministic fake
+130 tests, no GPU and no download: the search runs against a deterministic fake
 model with a handful of string "tokens" and an explicit probability table,
 which is what makes it possible to assert that three spellings of `"cat"` sum
 to exactly 0.7 and that a pruned branch was never *explored* rather than
