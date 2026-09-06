@@ -301,3 +301,14 @@ def test_a_token_is_worth_the_same_however_the_search_reaches_it():
         assert by_id[token] == pytest.approx(reference[token])
     # ...and the mass reported counts what was actually handed back.
     assert recovered.kept_mass == pytest.approx(wide.kept_mass)
+
+
+def test_an_empty_context_fails_with_something_readable():
+    """A forward pass needs at least one token.
+
+    Without this the failure surfaces as an IndexError from inside the tensor
+    library, which says nothing about what the caller did wrong.
+    """
+    lm = cat_lm(CONTEXT)
+    with pytest.raises(ValueError, match="nothing to continue from"):
+        predict(lm, (), "ca", PredictConfig(k=5, max_rounds=2), COSTS)

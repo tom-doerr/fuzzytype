@@ -660,6 +660,15 @@ def predict(
     cfg = config or PredictConfig()
     ch_costs = costs or ChannelCosts()
     prefix = tuple(prefix_ids)
+    if not prefix:
+        # "What follows nothing" is not a question a language model can be
+        # asked -- a forward pass needs at least one token, and without this
+        # the failure is an IndexError from inside the tensor library.
+        raise ValueError(
+            "nothing to continue from: the model needs at least one token, "
+            "so an empty document requires a preamble "
+            "(see EngineConfig.preamble)"
+        )
     budget = ch_costs.budget(len(query))
     stats = PredictStats()
     merged: dict[str, _Merged] = {}
