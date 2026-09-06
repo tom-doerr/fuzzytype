@@ -38,10 +38,23 @@ tolerance is a fallback, and costs more.
 | `hel` | `Hello`, `Hello everyone`, `Help` — the `l` is treated as evidence |
 | `th wthr hs bn` | `The weather has been good this week` |
 
-Every suggestion carries its probability and its **match quality**, because
-that is the signal you steer on: `exact` means it has you and you can stop
-typing; `loose` means it is stretching, so add a letter — or delete one that
-was a typo.
+Every suggestion carries three numbers and a match quality, because that is
+what you steer on:
+
+| column | means |
+| --- | --- |
+| **P(meant)** | the two signals combined — the ranking |
+| **P(text)** | what the model alone thinks of this text, among the rows shown |
+| **P(keys)** | what your keystrokes alone say, among the rows shown |
+| **match** | error per keystroke read: `exact`, `close`, `good`, `loose` |
+
+Reading them together tells you *why* something is on the list. A row with
+high `P(text)` and near-zero `P(keys)` is text the model likes but you did not
+type; the reverse is something that matches your keys but nobody would write.
+
+`match` is a rate, not a total, so it means the same thing whether a
+suggestion took on three of your characters or thirty — and anything looser
+than `loose` is not offered at all.
 
 ## Two modes
 
@@ -93,6 +106,21 @@ score(c) = log P(c | context)   +   log P(keystrokes | c)
 One string can be spelled by several token sequences, and those are merged
 with `logsumexp`, so a two-token and a one-token spelling of the same word
 compete as one candidate on the total probability of the string.
+
+**There is no priming text.** An empty document starts from the model's own
+document-boundary token, and what gets suggested comes from looking the
+keystrokes up in the vocabulary — from a bare document start, `thi` retrieves
+`This`, `thing`, `this`, `third`, `think`. Prose put in front of the document
+is a *prior* on everything that follows, and a strong one: a diary-ish opener
+made "This is a test" less likely than "This is my latest update", so the
+phrase could not surface however long the search ran. `--preamble` still takes
+one if you want to set the register deliberately.
+
+Removing it does mean the model has almost nothing to go on, and a base model
+with nothing to go on repeats itself. A repeated fragment also matches
+shorthand at *every* repeat, so neither signal rejects it —
+`thisthisthisthis` reads `thisatest` about as well as `this is a test` does.
+Repetition is therefore refused outright.
 
 **The channel** is an alignment grid whose costs are negative
 log-probabilities of real typing behaviour: a substitution (cheaper between
@@ -357,7 +385,7 @@ Press `f1` in the TUI for the keys.
 python -m pytest
 ```
 
-144 tests, no GPU and no download: the search runs against a deterministic fake
+149 tests, no GPU and no download: the search runs against a deterministic fake
 model with a handful of string "tokens" and an explicit probability table,
 which is what makes it possible to assert that three spellings of `"cat"` sum
 to exactly 0.7 and that a pruned branch was never *explored* rather than

@@ -371,6 +371,40 @@ class _Merged:
             self.tokens = tokens
 
 
+def is_degenerate(text: str) -> bool:
+    """True for text that is one fragment said over and over.
+
+    A base model with little context in front of it falls into repetition,
+    and a repeated fragment is exactly what fuzzy matching likes: it lines up
+    against the keystrokes again at every repeat, so "thisthisthisthis" reads
+    "thisatest" as well as "this is a test" does. Neither signal rejects it,
+    so it has to be rejected outright.
+    """
+    packed = "".join(text.split())
+    if len(packed) >= 6:
+        for size in range(1, len(packed) // 3 + 1):
+            repeats = len(packed) // size
+            if repeats >= 3 and packed[: size * repeats] == packed[:size] * repeats:
+                return True
+    # Compared without case or punctuation, so that "Hello! Hello! Hello"
+    # is caught as readily as "hello hello hello".
+    words = ["".join(ch for ch in w if ch.isalnum()).lower() for w in text.split()]
+    words = [w for w in words if w]
+    for i in range(len(words) - 2):
+        if words[i] == words[i + 1] == words[i + 2]:
+            return True
+    for i in range(len(words) - 1):
+        # Two in a row is enough for a word long enough that saying it twice
+        # is not something anyone does -- "Hello, Hello" -- while leaving
+        # short doublings like "had had" alone.
+        if words[i] == words[i + 1] and len(words[i]) >= 5:
+            return True
+    for i in range(len(words) - 3):  # a repeated pair, "the cat the cat"
+        if words[i : i + 2] == words[i + 2 : i + 4]:
+            return True
+    return False
+
+
 def _key_of(text: str) -> str:
     """The word or phrase a text has completed, terminator removed."""
     return text.rstrip(_TERMINATOR_STR).strip()
@@ -769,6 +803,8 @@ def predict(
                 )
 
                 key = _emission_key(node.text, child.text)
+                if key is not None and is_degenerate(key):
+                    key = None
                 if key is not None:
                     # A candidate need only account for *part* of what has
                     # been typed: the rest is the next suggestion's job, not a

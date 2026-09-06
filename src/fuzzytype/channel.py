@@ -191,6 +191,19 @@ class MatchResult:
     #: How many keystrokes this candidate accounts for. Accepting it consumes
     #: exactly these, leaving the rest to be matched by what comes next.
     keystrokes: int = 0
+    #: The part of ``cost`` that is actual error, with the charge for
+    #: keystrokes left unread taken back out.
+    errors: float = 0.0
+
+    @property
+    def error_rate(self) -> float:
+        """Error in nats per keystroke read -- the length-independent measure.
+
+        Raw error cannot describe match quality on its own: reading
+        thirty-three keystrokes of dense shorthand accrues more of it than
+        reading three, without being any worse a reading.
+        """
+        return self.errors / self.keystrokes if self.keystrokes else float("inf")
 
     @property
     def likelihood(self) -> float:
@@ -316,6 +329,7 @@ def match(query: str, candidate: str, costs: ChannelCosts) -> MatchResult:
         total = cost + costs.tail_charge(len(query) - keystrokes)
         if total < best.cost:
             best = MatchResult(
-                cost=total, consumed=consumed, keystrokes=keystrokes
+                cost=total, consumed=consumed, keystrokes=keystrokes,
+                errors=cost,
             )
     return best

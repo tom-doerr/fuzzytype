@@ -32,7 +32,20 @@ from dataclasses import dataclass
 from .channel import ChannelCosts, match
 from .search import Candidate
 
-__all__ = ["Suggestion", "rerank", "DEFAULT_LENGTH_BONUS", "length_credit"]
+__all__ = [
+    "Suggestion",
+    "rerank",
+    "DEFAULT_LENGTH_BONUS",
+    "MAX_ERROR_RATE",
+    "length_credit",
+]
+
+#: Error, in nats per keystroke read, past which a reading is not worth
+#: offering. Measured on real matches: a good reading of dense shorthand runs
+#: about 0.56 nats per keystroke and a correct prefix about 0.64, while a
+#: wrong-but-plausible one runs 1.20. Anything past this is the matcher
+#: forcing an alignment that is not there.
+MAX_ERROR_RATE = 1.6
 
 #: Coefficient of the saturating length term (see :func:`length_credit`).
 #: 1.5 by measurement: it is small enough that "hello" still beats a
@@ -82,8 +95,17 @@ class Suggestion:
     consumed: int  # characters of `text` the keystrokes explain
     #: Keystrokes accounted for. Accepting consumes exactly these.
     keystrokes: int
+    #: Error in nats per keystroke read: how good the reading is, independent
+    #: of how much of the input it took on.
+    error_rate: float
     score: float  # log posterior, including any length bonus
     probability: float  # normalised over the candidate set
+    #: What the model alone thinks of this text, as a share of the rows shown.
+    lm_probability: float
+    #: What the keystrokes alone say, as a share of the rows shown. Beside the
+    #: combined figure, these make it visible which of the two signals is
+    #: driving a suggestion.
+    match_probability: float
     n_paths: int
 
     @property
@@ -115,6 +137,7 @@ def rerank(
     k: int | None = None,
     drop_over_budget: bool = True,
     cost_weight: float = 1.0,
+    max_error_rate: float = MAX_ERROR_RATE,
 ) -> tuple[list[Suggestion], float]:
     """Re-score a cached pool against the keystrokes typed so far.
 
@@ -134,8 +157,9 @@ def rerank(
         result = match(query, cand.text, ch)
         if query and result.keystrokes == 0:
             continue  # accounts for nothing that was typed
-        errors = result.cost - ch.tail_charge(len(query) - result.keystrokes)
-        if drop_over_budget and errors > ch.budget(result.keystrokes):
+        if query and result.error_rate > max_error_rate:
+            continue  # the alignment is being forced
+        if drop_over_budget and result.errors > ch.budget(result.keystrokes):
             continue
         score = (
             cand.logprob
@@ -143,15 +167,40 @@ def rerank(
             + length_credit(cand.text, length_bonus)
         )
         scored.append(
-            (score, cand, result.cost, result.consumed, result.keystrokes)
+            (
+                score,
+                cand,
+                result.cost,
+                result.consumed,
+                result.keystrokes,
+                result.error_rate,
+            )
         )
 
     if not scored:
         return [], 0.0
 
-    top = max(item[0] for item in scored)
-    total = sum(math.exp(item[0] - top) for item in scored)
+    def share(values: list[float]) -> list[float]:
+        """Softmax, so each signal reads as a share of the same candidate set."""
+        peak = max(values)
+        weights = [math.exp(v - peak) for v in values]
+        total = sum(weights)
+        return [w / total for w in weights]
+
+    combined = share([item[0] for item in scored])
+    scored = [item + (c,) for item, c in zip(scored, combined)]
     scored.sort(key=lambda item: (-item[0], item[1].text))
+    visible = scored if k is None else scored[:k]
+    # The two diagnostic columns are shares of what is actually on screen, not
+    # of everything found. Over the whole pool they are so peaked that a
+    # single unshown candidate takes all of it and every visible row reads
+    # 0.0%; the question they answer is which of the two signals is driving
+    # the rows in front of you.
+    from_model = share([item[1].logprob for item in visible])
+    from_match = share([-item[2] for item in visible])
+    scored = [
+        item + (m, f) for item, m, f in zip(visible, from_model, from_match)
+    ]
 
     out = [
         Suggestion(
@@ -161,11 +210,16 @@ def rerank(
             cost=cost,
             consumed=min(consumed, len(cand.text)),
             keystrokes=keystrokes,
+            error_rate=error_rate,
             score=score,
-            probability=math.exp(score - top) / total,
+            probability=probability,
+            lm_probability=lm_probability,
+            match_probability=match_probability,
             n_paths=cand.n_paths,
         )
-        for score, cand, cost, consumed, keystrokes in scored
+        for (
+            score, cand, cost, consumed, keystrokes, error_rate,
+            probability, lm_probability, match_probability,
+        ) in scored
     ]
-    shown = out if k is None else out[:k]
-    return shown, sum(s.probability for s in shown)
+    return out, sum(s.probability for s in out)

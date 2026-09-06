@@ -120,3 +120,22 @@ def test_typing_less_is_cheaper_than_typing_wrong():
     """
     assert COSTS.skip_open < COSTS.substitute < COSTS.delete
     assert COSTS.skip_extend < COSTS.skip_open
+
+
+def test_the_two_signals_are_reported_separately():
+    """So it is visible which of them is driving a suggestion."""
+    # "bird" reads the keystrokes slightly better; "bread" is the likelier text
+    pool = [_candidate("bird", -8.0), _candidate("bread", -2.0)]
+    shown, _ = rerank(pool, "brd", COSTS)
+    by_text = {s.text: s for s in shown}
+    assert by_text["bread"].lm_probability > by_text["bird"].lm_probability
+    assert by_text["bird"].match_probability > by_text["bread"].match_probability
+    for column in ("probability", "lm_probability", "match_probability"):
+        assert sum(getattr(s, column) for s in shown) == pytest.approx(1.0)
+
+
+def test_a_forced_alignment_is_not_offered():
+    """Past a certain error per keystroke the matcher is inventing a reading."""
+    pool = [_candidate("bread", -2.0)]
+    assert rerank(pool, "brd", COSTS)[0], "a real abbreviation stays"
+    assert rerank(pool, "qzxvk", COSTS)[0] == [], "a forced one does not"

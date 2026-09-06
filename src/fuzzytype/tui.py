@@ -38,12 +38,17 @@ __all__ = ["FuzzyTypeApp", "run_tui", "quality_label"]
 
 #: How the channel cost reads in words. The typist steers on this: "exact"
 #: means stop typing, "loose" means give the system another letter.
+#: How the reading reads, in error per keystroke taken on. A rate rather than
+#: a total, because reading thirty-three keystrokes of dense shorthand accrues
+#: more error than reading three without being any worse a reading -- against
+#: a total, every long match was labelled "stretch" and the column said
+#: nothing. Measured: a good reading runs about 0.55, a correct prefix 0.64, a
+#: wrong-but-plausible one 1.20.
 _QUALITY = (
     (0.01, "exact"),
-    (1.0, "case"),
-    (4.0, "1 slip"),
-    (8.0, "2 slips"),
-    (13.0, "loose"),
+    (0.35, "close"),
+    (0.80, "good"),
+    (1.60, "loose"),
 )
 
 HELP = """\
@@ -67,9 +72,11 @@ want. Type as much or as little as you like:
 | `gt bck` | `get back to you as soon as possible` -- a whole sentence |
 | `aprico` | `apricots` -- a word the model would never have guessed |
 
-Watch the **match** column. `exact` means the system has you and you can
-stop typing. `loose` means it is stretching to explain your keystrokes --
-add a letter, or delete one that was a typo.
+Watch the **match** column: it is error per keystroke read, so it means the
+same thing whether a suggestion took on three of your characters or thirty.
+`exact` and `close` mean the system has you. `loose` means it is working to
+explain your keystrokes -- add a letter, or delete one that was a typo.
+Anything worse is not offered at all.
 
 ## Keys
 
@@ -125,10 +132,10 @@ _TICK_SECONDS = 0.2
 _LOADING_TICKS = 5
 
 
-def quality_label(cost: float) -> str:
-    """Plain words for a channel cost, so the typist can act on it."""
+def quality_label(error_rate: float) -> str:
+    """Plain words for how well a candidate reads what was typed."""
     for limit, label in _QUALITY:
-        if cost < limit:
+        if error_rate < limit:
             return label
     return "stretch"
 
@@ -223,7 +230,9 @@ class FuzzyTypeApp(App):
     def on_mount(self) -> None:
         self.set_interval(_TICK_SECONDS, self._tick_spinner)
         table = self.query_one("#suggestions", DataTable)
-        table.add_columns("#", "P(meant)", "match", "suggestion")
+        table.add_columns(
+            "#", "P(meant)", "P(text)", "P(keys)", "match", "suggestion"
+        )
         # This is an input method: the app owns every key. A focusable table
         # would otherwise swallow enter and the arrows for its own cursor.
         table.can_focus = False
@@ -539,7 +548,12 @@ class FuzzyTypeApp(App):
             table.add_row(
                 Text(str(i + 1), style="dim"),
                 Text(f"{s.probability:6.1%}", style=_bar_style(s.probability)),
-                Text(quality_label(s.cost), style=_cost_style(s.cost)),
+                Text(f"{s.lm_probability:6.1%}", style="dim cyan"),
+                Text(f"{s.match_probability:6.1%}", style="dim magenta"),
+                Text(
+                    quality_label(s.error_rate),
+                    style=_cost_style(s.error_rate),
+                ),
                 line,
             )
         if self._suggestions:
@@ -596,10 +610,10 @@ def _bar_style(probability: float) -> str:
     return "dim"
 
 
-def _cost_style(cost: float) -> str:
-    if cost < 1.0:
+def _cost_style(error_rate: float) -> str:
+    if error_rate < 0.35:
         return "green"
-    if cost < 8.0:
+    if error_rate < 0.80:
         return "yellow"
     return "red"
 

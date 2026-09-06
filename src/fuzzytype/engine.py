@@ -27,17 +27,17 @@ from .rank import DEFAULT_LENGTH_BONUS, Suggestion, rerank
 
 __all__ = ["EngineConfig", "Engine", "DEFAULT_PREAMBLE"]
 
-#: A base model continues text; with an empty document it has nothing to
-#: continue. What it is given matters more than it looks, and it is a strong
-#: prior on the first sentence, not just a register cue. Measured with an
-#: empty document: a bare newline produces Java imports; a *description* of
-#: the task is continued by describing the task further, at 99.9% confidence;
-#: and a diary-ish opener ("the week went by quickly...") primes so hard for
-#: "my latest update" that "This is a test" scores -14.73 against its -13.39
-#: and can never surface, however long the search runs. The opener below is
-#: deliberately topic-free: it flips that to -11.60 against -16.40 while
-#: still giving ordinary sentence starts.
-DEFAULT_PREAMBLE = "Notes.\n\nI want to keep this clear and short. "
+#: No primer. A forward pass needs at least one token, so an empty document
+#: starts from the model's own document-boundary token instead of invented
+#: prose -- and what gets suggested comes from looking up the vocabulary for
+#: what was actually typed, which needs no register cue at all: from a bare
+#: document start, "thi" retrieves "This", "thing", "this", "third", "think".
+#:
+#: Any prose put here is a prior on everything that follows, and a strong one.
+#: A diary-ish opener made "This is a test" *less* likely than "This is my
+#: latest update", so the phrase could not surface however long the search
+#: ran. Set it deliberately or not at all.
+DEFAULT_PREAMBLE = ""
 
 
 @dataclass
@@ -145,6 +145,10 @@ class Engine:
             else ""
         )
         ids = self.lm.encode((preamble + self.text).rstrip(" \t"))
+        if not ids:
+            # Nothing written yet: begin where the model believes a document
+            # begins, rather than in the middle of invented prose.
+            ids = [self.lm.document_start_id]
         limit = self.config.max_context_tokens
         return ids[-limit:] if len(ids) > limit else ids
 

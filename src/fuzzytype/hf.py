@@ -95,6 +95,11 @@ class HFLanguageModel:
             .eval()
         )
         self.eos_token_id = self.tokenizer.eos_token_id
+        self.document_start_id = (
+            self.tokenizer.bos_token_id
+            if self.tokenizer.bos_token_id is not None
+            else self.tokenizer.eos_token_id
+        )
         self._token_bytes, self.special_token_ids = self._build_token_bytes()
         self._prefix_keys, self._prefix_ids = self._build_prefix_index()
         self._short_prefixes = self._build_short_prefixes()

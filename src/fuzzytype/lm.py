@@ -48,6 +48,10 @@ class LanguageModel(Protocol):
     #: Tokens that are markup rather than text (chat markers, <think>, ...).
     #: The search refuses to decode through them.
     special_token_ids: frozenset[int]
+    #: What the model considers the start of a document. Used as context when
+    #: nothing has been written, since a forward pass needs a token and this
+    #: is the one the model was trained to see there.
+    document_start_id: int
 
     def encode(self, text: str) -> list[int]:
         """Tokenize ``text`` without adding special tokens."""

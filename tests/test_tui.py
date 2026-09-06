@@ -40,10 +40,17 @@ def _drive(steps):
     return asyncio.run(main())
 
 
-def test_quality_label_tells_the_typist_what_to_do():
+def test_quality_label_reads_error_per_keystroke():
+    """A rate, not a total.
+
+    Against a total, reading thirty-three keystrokes of dense shorthand was
+    labelled "stretch" for accruing more error than reading three -- so every
+    long match said "stretch" and the column carried no information.
+    """
     assert quality_label(0.0) == "exact"
-    assert quality_label(0.5) == "case"
-    assert quality_label(3.0) == "1 slip"
+    assert quality_label(0.2) == "close"
+    assert quality_label(0.6) == "good"
+    assert quality_label(1.2) == "loose"
     assert quality_label(99.0) == "stretch"
 
 

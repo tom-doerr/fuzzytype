@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 import pytest
-from fake_lm import cat_lm, long_lm, prefix_lm
+from fake_lm import FakeLM, cat_lm, long_lm, prefix_lm
 
 from fuzzytype.channel import ChannelCosts
 from fuzzytype.search import (
@@ -312,3 +312,44 @@ def test_an_empty_context_fails_with_something_readable():
     lm = cat_lm(CONTEXT)
     with pytest.raises(ValueError, match="nothing to continue from"):
         predict(lm, (), "ca", PredictConfig(k=5, max_rounds=2), COSTS)
+
+
+def test_repetition_is_refused():
+    """Neither signal rejects it, so it has to be rejected outright.
+
+    A base model with little context in front of it loops, and a repeated
+    fragment lines up against the keystrokes again at every repeat -- so
+    "thisthisthisthis" reads "thisatest" about as well as "this is a test"
+    does, and the model is happy with it too.
+    """
+    from fuzzytype.search import is_degenerate
+
+    for text in (
+        "thisthisthis",
+        "Helvetica Helvetica Helvetica",
+        "the cat the cat sat",
+    ):
+        assert is_degenerate(text), text
+    for text in (
+        "this is a test of the new text input system",
+        "get back to you as soon as possible",
+        "This is a test",
+        "hello",
+    ):
+        assert not is_degenerate(text), text
+
+
+def test_a_repeating_candidate_never_reaches_the_ranking():
+    lm = FakeLM(
+        ["<eos>", " ", ".", "ha"],
+        {
+            (): {"ha": 1.0},
+            ("ha",): {"ha": 1.0},
+            ("ha", "ha"): {"ha": 1.0},
+            ("ha", "ha", "ha"): {" ": 1.0},
+            ("ha", "ha", "ha", " "): {"<eos>": 1.0},
+        },
+        context=(1,),
+    )
+    found, _ = predict(lm, (1,), "hh", PredictConfig(k=10, max_rounds=6), COSTS)
+    assert not [c for c in found if c.text == "hahaha"]

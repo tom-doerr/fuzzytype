@@ -23,6 +23,7 @@ class FakeLM:
         self.special_token_ids = frozenset(
             {self.eos_token_id} if eos_token else set()
         )
+        self.document_start_id = self.eos_token_id or 0
         self.context = tuple(context)
         self._longest_first = sorted(self.vocab, key=len, reverse=True)
         #: every sequence the search asked to expand, so a test can assert a
