@@ -28,17 +28,16 @@ from .rank import DEFAULT_LENGTH_BONUS, Suggestion, rerank
 __all__ = ["EngineConfig", "Engine", "DEFAULT_PREAMBLE"]
 
 #: A base model continues text; with an empty document it has nothing to
-#: continue. What it is given matters more than it looks. Measured on this
-#: model with an empty document: a bare newline produces Java import
-#: statements, and a *description* of the task ("The following is a note
-#: written in plain English") is continued by describing the task further --
-#: it came back at 99.9% confidence repeating its own preamble. Two sentences
-#: of ordinary prose, ended at a sentence boundary, are continued the way a
-#: person would continue them.
-DEFAULT_PREAMBLE = (
-    "I have been meaning to write this down for a while. The week went by "
-    "quickly and there is a lot to catch up on. "
-)
+#: continue. What it is given matters more than it looks, and it is a strong
+#: prior on the first sentence, not just a register cue. Measured with an
+#: empty document: a bare newline produces Java imports; a *description* of
+#: the task is continued by describing the task further, at 99.9% confidence;
+#: and a diary-ish opener ("the week went by quickly...") primes so hard for
+#: "my latest update" that "This is a test" scores -14.73 against its -13.39
+#: and can never surface, however long the search runs. The opener below is
+#: deliberately topic-free: it flips that to -11.60 against -16.40 while
+#: still giving ordinary sentence starts.
+DEFAULT_PREAMBLE = "Notes.\n\nI want to keep this clear and short. "
 
 
 @dataclass
@@ -52,6 +51,14 @@ class EngineConfig:
     refresh_cost: float = 1.0
     #: Context fed to the model, in tokens. Bounds the cost of every forward.
     max_context_tokens: int = 192
+    #: Drop the preamble once the document itself is this long, in characters.
+    #: The preamble exists only to give the model something to continue when
+    #: there is nothing; kept beyond that it is just an arbitrary prior on
+    #: everything that follows. It decides the first sentence outright -- a
+    #: diary-ish opener made "This is a test" *less* likely than "This is my
+    #: latest update" and no amount of searching could surface it -- so it
+    #: should stop applying as soon as the writing can speak for itself.
+    preamble_until: int = 80
     #: How many candidates to keep across decodes. Bigger means less is
     #: rediscovered, but every keystroke re-scores the whole pool.
     max_pool: int = 600
@@ -132,7 +139,12 @@ class Engine:
         # become digits -- "1", "2", "3" -- and word fragments; with the space
         # removed they are " new", " more", " clothes". The space is dropped
         # here and supplied by the candidate, which carries its own.
-        ids = self.lm.encode((self.config.preamble + self.text).rstrip(" \t"))
+        preamble = (
+            self.config.preamble
+            if len(self.text) < self.config.preamble_until
+            else ""
+        )
+        ids = self.lm.encode((preamble + self.text).rstrip(" \t"))
         limit = self.config.max_context_tokens
         return ids[-limit:] if len(ids) > limit else ids
 

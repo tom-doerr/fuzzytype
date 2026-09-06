@@ -265,3 +265,19 @@ def test_committing_after_a_space_does_not_double_it():
     engine.text = "hello "
     engine.commit(" there")
     assert engine.text == "hello there"
+
+
+def test_the_preamble_steps_aside_once_there_is_real_text():
+    """It exists to give the model something to continue, nothing more.
+
+    Kept beyond that it is an arbitrary prior on everything that follows: a
+    diary-ish opener made "This is a test" less likely than "This is my
+    latest update", so the phrase could never surface however long the search
+    ran.
+    """
+    engine = _engine(preamble=".", preamble_until=10)
+    engine.text = " cat"
+    assert engine.lm.decode(engine.context_ids()).startswith(".")
+
+    engine.text = " cat" * 5  # longer than preamble_until
+    assert not engine.lm.decode(engine.context_ids()).startswith(".")

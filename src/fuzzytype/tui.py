@@ -112,7 +112,7 @@ _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 #: because it is the one setting whose right value depends entirely on what
 #: is being written: a single word needs a handful of rounds, a long sentence
 #: from heavy shorthand wants all of them.
-_ROUND_STEPS = (4, 8, 12, 20, 32, 48, 80, 120)
+_ROUND_STEPS = (8, 16, 32, 60, 120, 200, 320, 500)
 
 #: Spinner period, and how many of those to skip while the model loads.
 #: Repainting during the load was suspected of starving the loader thread,

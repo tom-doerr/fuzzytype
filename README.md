@@ -211,6 +211,30 @@ candidate *does* read, so it has to exceed what reading one costs — at 1.2 the
 ranking preferred `Thi|s week`, having read three keystrokes; at 3.0 it gives
 `This is the start of the next section`, having read twenty-four.
 
+## The exchange rate is a preference, not a measurement
+
+`tail_extend` is the credit for each keystroke a candidate reads, and it is a
+hand-set constant. I tried three ways to derive it from the data instead, and
+all three failed in the same instructive way:
+
+| estimator | value | resulting top suggestion for `thisatest` |
+| --- | --- | --- |
+| pool regression of `−logprob` on keystrokes | 0.91 | `This week` (4 of 9) |
+| nats-per-char × chars-per-keystroke | 0.68 | `This week` (4 of 9) |
+| marginal rate along the efficient frontier | 0.32, and **−0.64** on one query | `This week` (4 of 9) |
+| hand-set | 3.0 | `This is the latest version` (9 of 9) |
+
+Two things go wrong. The pool is a *survivorship-biased* sample — only
+candidates the search kept are visible, so longer ones look artificially
+cheap, which is how a rate comes out negative. And more fundamentally, setting
+the rate to the model's own marginal cost per keystroke makes coverage exactly
+**neutral**: a long candidate and its short prefix then score identically by
+construction, and the tie breaks toward short because short candidates are
+more numerous. Preferring coverage means paying *more* than the model charges,
+which is a statement about what you want from an input method — more sentence
+per keystroke — and not a property of the model. So it stays a knob, now with
+the measurements to say why.
+
 ## What it does not do yet
 
 Dense multi-word abbreviation with no separators does not reliably resolve.
@@ -333,7 +357,7 @@ Press `f1` in the TUI for the keys.
 python -m pytest
 ```
 
-142 tests, no GPU and no download: the search runs against a deterministic fake
+144 tests, no GPU and no download: the search runs against a deterministic fake
 model with a handful of string "tokens" and an explicit probability table,
 which is what makes it possible to assert that three spellings of `"cat"` sum
 to exactly 0.7 and that a pruned branch was never *explored* rather than

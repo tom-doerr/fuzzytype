@@ -128,10 +128,12 @@ class PredictConfig:
     child_top_p: float = 0.9995
     batch_size: int = 24
     #: How long to keep looking. Each round is one batched forward pass, and
-    #: more rounds means more and longer phrases. It can afford to be generous
-    #: because results are published as they are found and the search can be
-    #: interrupted the moment they stop being wanted.
-    max_rounds: int = 40
+    #: more rounds means more and longer phrases -- 40 rounds finds ~700
+    #: candidates on a nine-character shorthand, 120 finds ~2000. It can
+    #: afford to be generous because results are published as they are found
+    #: and the search is interrupted the moment they stop being wanted, so the
+    #: cost of a big budget is only paid when nobody is typing.
+    max_rounds: int = 120
     #: Publish the ranking so far every this many rounds.
     publish_every: int = 3
     max_expansions: int = 4000
