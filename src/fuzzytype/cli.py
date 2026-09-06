@@ -44,7 +44,7 @@ def _add_common(parser: argparse.ArgumentParser, *, suppress: bool = False) -> N
         "--length-bonus",
         type=float,
         default=default(DEFAULT_LENGTH_BONUS),
-        help="nats per character added back to offset the prior's length penalty",
+        help="how much longer candidates are preferred (saturating; 0 disables)",
     )
     parser.add_argument(
         "-k", "--top", type=int, default=default(8), help="rows to show"

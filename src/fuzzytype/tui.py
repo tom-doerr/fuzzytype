@@ -97,7 +97,7 @@ add a letter, or delete one that was a typo.
 
 #: ctrl+s cycles these: nats per character added back to offset the prior's
 #: bias towards short candidates.
-_LENGTH_BONUSES = (0.0, 0.4, 0.8)
+_LENGTH_BONUSES = (0.0, 1.5, 3.0)
 _LENGTH_LABELS = ("words", "phrases", "sentences")
 
 

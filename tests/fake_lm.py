@@ -140,3 +140,55 @@ LONG_TABLE = {
 
 def long_lm(context=(1,)):
     return FakeLM(LONG_VOCAB, LONG_TABLE, context=context)
+
+
+def _prefix_methods(cls):
+    """Vocabulary lookup, so the fake supports prefix seeding too."""
+
+    def tokens_with_prefix(self, prefix, limit=512):
+        key = prefix.lstrip().lower()
+        if not key:
+            return []
+        out = [
+            i
+            for i, tok in enumerate(self.vocab)
+            if i not in self.special_token_ids
+            and tok.lstrip().lower().startswith(key)
+        ]
+        return out[:limit]
+
+    def token_logprobs(self, sequence, token_ids):
+        import math as _math
+
+        dist = self.table.get(self._state(sequence), {})
+        return [
+            _math.log(dist[self.vocab[i]]) if dist.get(self.vocab[i], 0.0) > 0
+            else float("-inf")
+            for i in token_ids
+        ]
+
+    cls.tokens_with_prefix = tokens_with_prefix
+    cls.token_logprobs = token_logprobs
+    return cls
+
+
+_prefix_methods(FakeLM)
+
+
+#: A world where one whole word is a single token that the walk cannot reach,
+#: because it sits outside the top-k the search expands. Only a vocabulary
+#: lookup finds it -- which is the "hel" -> "Hello" case.
+PREFIX_VOCAB = ["<eos>", " ", ".", " cat", " car", " cart", "s"]
+PREFIX_TABLE = {
+    (): {" cat": 0.6, " car": 0.3, " cart": 0.05},
+    (" cat",): {" ": 1.0},
+    (" car",): {" ": 1.0},
+    (" cart",): {" ": 1.0},
+    (" cat", " "): {"<eos>": 1.0},
+    (" car", " "): {"<eos>": 1.0},
+    (" cart", " "): {"<eos>": 1.0},
+}
+
+
+def prefix_lm(context=(1,)):
+    return FakeLM(PREFIX_VOCAB, PREFIX_TABLE, context=context)

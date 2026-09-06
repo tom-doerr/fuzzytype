@@ -94,7 +94,7 @@ class ChannelCosts:
 
     substitute: float = 4.0  # ~1.8% -- an unrelated wrong letter
     substitute_near: float = 2.6  # ~7%  -- a neighbouring key
-    delete: float = 3.5  # ~3%  -- a keystroke nothing explains
+    delete: float = 6.0  # a keystroke nothing explains -- deliberately dear
     skip: float = 2.3  # ~10% -- a character the typist did not type
     case: float = 0.4  # right letter, wrong case
     #: How much total error to tolerate before a branch is abandoned. It has

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from fuzzytype.channel import ChannelCosts
-from fuzzytype.rank import rerank
+from fuzzytype.rank import DEFAULT_LENGTH_BONUS, length_credit, rerank
 from fuzzytype.search import Candidate
 
 COSTS = ChannelCosts()
@@ -60,7 +60,7 @@ def test_over_budget_candidates_are_dropped():
 def test_length_bonus_shifts_the_preference_to_longer_text():
     pool = [_candidate("go", -1.0), _candidate("go to the shop", -4.0)]
     short, _ = rerank(pool, "", COSTS, length_bonus=0.0)
-    long, _ = rerank(pool, "", COSTS, length_bonus=0.8)
+    long, _ = rerank(pool, "", COSTS, length_bonus=3.0)
     assert short[0].text == "go"
     assert long[0].text == "go to the shop"
 
@@ -69,3 +69,48 @@ def test_reranking_never_touches_the_model():
     """The per-keystroke path must be pure Python; this is what makes it fast."""
     shown, _ = rerank(POOL, "clo", COSTS)
     assert shown  # no LanguageModel was supplied at all
+
+
+def test_a_disambiguating_letter_promotes_the_matching_candidate():
+    """The reported bug: typing "he", then adding "l" to mean "hello".
+
+    Every suggestion stayed "Here ...". Two causes, both fixed elsewhere: the
+    Hello family was never decoded at all, and a 27-character candidate
+    collected +10.8 nats of an uncapped length bonus -- more than the cost of
+    ignoring the "l" outright. Adding a letter to disambiguate made the wrong
+    answer *more* confident.
+
+    The priors here are the ones the model actually assigns after the default
+    preamble, so this is the measured case rather than an invented one.
+    """
+    pool = [
+        _candidate("Hello everyone", -11.25),
+        _candidate("Here is what I have written", -10.70),
+    ]
+    # "he" is genuinely ambiguous -- both match, so the prior may lead.
+    shown, _ = rerank(pool, "he", COSTS, length_bonus=DEFAULT_LENGTH_BONUS)
+    assert shown[0].text == "Here is what I have written"
+    # ...but the "l" is evidence, and it has to move the ranking.
+    shown, _ = rerank(pool, "hel", COSTS, length_bonus=DEFAULT_LENGTH_BONUS)
+    assert shown[0].text == "Hello everyone"
+
+
+def test_the_length_credit_saturates():
+    """Unbounded, it eventually decides the ranking by itself.
+
+    Doubling the length must be worth steadily less, so the gap between any
+    two candidates stays small enough that a better match can overcome it.
+    """
+    steps = [length_credit("x" * n, DEFAULT_LENGTH_BONUS) for n in (5, 10, 15, 20, 25)]
+    gains = [b - a for a, b in zip(steps, steps[1:])]
+    assert all(later < earlier for earlier, later in zip(gains, gains[1:]))
+    assert steps == sorted(steps), "longer must still be preferred"
+
+
+def test_length_credit_is_off_when_the_coefficient_is_zero():
+    assert length_credit("a long candidate", 0.0) == 0.0
+
+
+def test_an_unexplained_keystroke_costs_more_than_an_omitted_one():
+    """Adding a letter is deliberate; leaving one out is laziness."""
+    assert COSTS.delete > COSTS.skip

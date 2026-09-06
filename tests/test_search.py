@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 import pytest
-from fake_lm import cat_lm, long_lm
+from fake_lm import cat_lm, long_lm, prefix_lm
 
 from fuzzytype.channel import ChannelCosts
 from fuzzytype.search import (
@@ -144,3 +144,38 @@ def test_search_is_deterministic():
 def test_rounds_bound_the_wall_clock():
     _, _, stats = _run(max_rounds=1)
     assert stats.rounds == 1
+
+
+def test_a_word_outside_the_top_k_is_reachable_through_the_vocabulary():
+    """Walking the tree cannot find a word the model never proposes.
+
+    A whole word is often a single token that is ranked far below the search's
+    cut-off while still being a good guess -- "Hello" scores -14.2 against
+    "Here" at -11.6, under three nats apart, yet nowhere near the top-64 the
+    search expands. Typing "hel" then offered every "Here ..." and no "Hello",
+    and adding the "l" made it *worse*, because the letter could only be
+    charged as a slip.
+    """
+    config = PredictConfig(k=20, max_rounds=6, child_top_k=2)
+
+    blind = prefix_lm(CONTEXT)
+    found, _ = predict(blind, CONTEXT, "cart", config, COSTS)
+    assert "cart" not in {c.text for c in found}, "top-k should hide it"
+
+    seeing = prefix_lm(CONTEXT)
+    found, stats = predict(
+        seeing, CONTEXT, "cart", config, COSTS, seeds=[" cart"]
+    )
+    assert "cart" in {c.text for c in found}
+    assert stats.seeded >= 1
+
+
+def test_the_vocabulary_seed_carries_the_model_s_own_probability():
+    seeing = prefix_lm(CONTEXT)
+    found, _ = predict(
+        seeing, CONTEXT, "cart",
+        PredictConfig(k=20, max_rounds=6, child_top_k=2), COSTS, seeds=[" cart"],
+    )
+    cart = next(c for c in found if c.text == "cart")
+    # 0.05 for " cart" then 1.0 for the terminator -- not an assumed prior.
+    assert math.exp(cart.logprob) == pytest.approx(0.05)

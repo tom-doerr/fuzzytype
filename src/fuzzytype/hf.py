@@ -24,6 +24,7 @@ this keeps the backend a single stateless call.
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections.abc import Sequence
 
 import torch
@@ -94,6 +95,60 @@ class HFLanguageModel:
         )
         self.eos_token_id = self.tokenizer.eos_token_id
         self._token_bytes, self.special_token_ids = self._build_token_bytes()
+        self._prefix_keys, self._prefix_ids = self._build_prefix_index()
+
+    def _build_prefix_index(self) -> tuple[list[str], list[int]]:
+        """Vocabulary sorted by its text, for "which words start with this".
+
+        A whole word is very often a single token, and the model's ranking of
+        that token can sit thousands of places down the distribution while
+        still being a perfectly good guess: after this preamble "Hello" scores
+        -14.2 against "Here" at -11.6, a gap of under three nats, yet it is
+        nowhere near the top-64 the search expands. No amount of tree walking
+        finds it, because it is one token away and simply never proposed.
+
+        Looking it up in the vocabulary costs nothing at query time and one
+        forward pass to price. Leading spaces and case are normalised away so
+        that typing "hel" finds "Hello", " hello" and "Helsinki" alike.
+        """
+        pairs = sorted(
+            (self._token_bytes[i].decode("utf-8", errors="replace").lstrip().lower(), i)
+            for i in range(len(self._token_bytes))
+            if i not in self.special_token_ids
+        )
+        return [k for k, _ in pairs], [i for _, i in pairs]
+
+    def tokens_with_prefix(self, prefix: str, limit: int = 512) -> list[int]:
+        """Token ids whose text starts with ``prefix``, ignoring case and space."""
+        key = prefix.lstrip().lower()
+        if not key:
+            return []
+        out: list[int] = []
+        start = bisect_left(self._prefix_keys, key)
+        for i in range(start, len(self._prefix_keys)):
+            if not self._prefix_keys[i].startswith(key):
+                break
+            out.append(self._prefix_ids[i])
+            if len(out) >= limit:
+                break
+        return out
+
+    @torch.no_grad()
+    def token_logprobs(
+        self, sequence: Sequence[int], token_ids: Sequence[int]
+    ) -> list[float]:
+        """log P(token | sequence) for specific tokens, in one forward pass.
+
+        The cost does not depend on how many tokens are asked about, which is
+        what makes a wide vocabulary lookup affordable.
+        """
+        if not token_ids:
+            return []
+        ids = torch.tensor([list(sequence)], dtype=torch.long, device=self.device)
+        logits = self.model(input_ids=ids, logits_to_keep=1).logits[:, -1, :]
+        logprobs = torch.log_softmax(logits.float(), dim=-1)[0]
+        wanted = torch.tensor(list(token_ids), dtype=torch.long, device=self.device)
+        return logprobs.index_select(0, wanted).tolist()
 
     def _build_token_bytes(self) -> tuple[list[bytes], frozenset[int]]:
         """Per-token raw bytes, plus the ids the search must not decode through.

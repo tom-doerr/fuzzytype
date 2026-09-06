@@ -72,6 +72,22 @@ class LanguageModel(Protocol):
         """Truncated next-token distributions, one per input sequence."""
         ...
 
+    def tokens_with_prefix(self, prefix: str, limit: int = 512) -> list[int]:
+        """Token ids whose text starts with ``prefix``, ignoring case and space.
+
+        A whole word is often a single token that the model ranks far below
+        the search's cut-off while still being a good guess, so the search
+        cannot reach it by walking the tree. Asking the vocabulary directly
+        is what makes typing "hel" able to reach "Hello".
+        """
+        ...
+
+    def token_logprobs(
+        self, sequence: Sequence[int], token_ids: Sequence[int]
+    ) -> list[float]:
+        """log P(token | sequence) for specific tokens, in one forward pass."""
+        ...
+
     def sequence_logprobs(
         self, items: Sequence[tuple[Sequence[int], Sequence[int]]]
     ) -> list[float]:

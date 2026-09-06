@@ -128,6 +128,11 @@ class PredictConfig:
     #: Insert the literal keystrokes as a starting path, so a word the model
     #: would never have proposed is still reachable.
     seed_query: bool = True
+    #: How many vocabulary entries beginning with the keystrokes to consider,
+    #: and how many of them to seed once priced. Pricing is one forward pass
+    #: regardless of the first number, so it can afford to be generous.
+    seed_vocab_limit: int = 512
+    seed_vocab_top: int = 24
     #: Re-price this many finished candidates under their canonical
     #: tokenization. 0 disables it.
     rescore_top: int = 24
@@ -263,7 +268,7 @@ class _Node:
         order: pruning and stopping keep using the admissible ``bound()``, so
         a bad estimate can slow the search down but cannot make it drop a
         candidate it should have kept. Setting the penalty to 0 restores plain
-        A\*.
+        A*.
         """
         return self.bound() - progress_penalty * self.keystrokes_owed()
 
@@ -423,6 +428,40 @@ def _seed_token_paths(
     return paths
 
 
+def _vocabulary_nodes(
+    lm: LanguageModel, prefix: tuple[int, ...], seeds: Sequence[str],
+    root: _Node, query: str, costs: ChannelCosts, limit: int, top: int,
+) -> list[_Node]:
+    """Whole words from the vocabulary that begin with what was typed.
+
+    Walking the tree cannot find a word the model never proposes, and a
+    single-token word can be a good guess while sitting thousands of places
+    down the distribution: after the default preamble "Hello" scores -14.2
+    against "Here" at -11.6, under three nats apart, yet far outside the
+    top-64 the search expands. Typing "hel" would then offer every "Here ..."
+    and never "Hello" -- and adding the "l" would make it *worse*, since the
+    letter can only be charged as a slip.
+
+    The vocabulary knows the word. Candidates are found by prefix, priced by
+    a single forward pass whose cost does not depend on how many were found,
+    and the best few are handed to the search as starting paths, where they
+    compete on the same posterior as everything else.
+    """
+    if not prefix or top < 1:
+        return []
+    wanted, ids = [s.strip().lower() for s in seeds if s.strip()], []
+    for text in dict.fromkeys(wanted):
+        ids.extend(lm.tokens_with_prefix(text, limit))
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        return []
+    ranked = sorted(zip(ids, lm.token_logprobs(prefix, ids)), key=lambda kv: -kv[1])
+    return [
+        _child(root, (tid,), lm.token_bytes(tid), logprob, query, costs)
+        for tid, logprob in ranked[:top]
+    ]
+
+
 def _seed_nodes(
     lm: LanguageModel, prefix: tuple[int, ...], seeds: Sequence[str],
     root: _Node, query: str, costs: ChannelCosts,
@@ -518,6 +557,10 @@ def predict(
     if cfg.seed_query and seeds:
         model_started = time.monotonic()
         seed_nodes = _seed_nodes(lm, prefix, seeds, root, query, ch_costs)
+        seed_nodes += _vocabulary_nodes(
+            lm, prefix, seeds, root, query, ch_costs,
+            cfg.seed_vocab_limit, cfg.seed_vocab_top,
+        )
         stats.seconds_model += time.monotonic() - model_started
         for node in seed_nodes:
             if node.tokens in pushed:

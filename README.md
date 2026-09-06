@@ -32,6 +32,7 @@ and the system works out which sentence fits your keystrokes best.
 | `gt bck` | `get back to you as soon as possible` |
 | `th wthr hs bn` | `The weather has been good this week` |
 | `aprico` | `apricots` — a word the model would never have guessed |
+| `hel` | `Hello`, `Hello everyone`, `Help` — the `l` is treated as evidence |
 
 Every suggestion carries its probability and its **match quality**, because
 that is the signal you steer on: `exact` means it has you and you can stop
@@ -67,7 +68,7 @@ that disagree with your keystrokes are abandoned after one token, branches
 that agree are decoded many tokens deep. The unpromising strings are never
 decoded at all.
 
-### Three things that were not obvious
+### Four things that were not obvious
 
 Each of these was a bug found by measurement, and each is documented at the
 code that fixes it.
@@ -80,12 +81,34 @@ starting path. Seeding the raw text does not work: `" apricot"` is spelled
 not in its top eight. The natural route to the word never passes through the
 partial word's token path. Seeding `" apr"` instead reaches it immediately.
 
+**A length preference must never become the ranking.** An honest posterior
+always prefers the shortest completion, so length has to be credited back or
+every suggestion is one word long. Credit *linear* in length is unbounded, and
+past some point it simply decides the outcome: against `hel`, a 27-character
+`"Here is what I have written"` collected 10.8 nats, more than the cost of
+ignoring the `l` entirely. Capping it flat does not work either — a cap low
+enough to protect the match is also low enough that every sentence hits it and
+length stops ordering anything. The credit is logarithmic instead, so going
+from five characters to twenty-five is worth a lot and from forty to sixty
+very little, which is also how useful the extra text actually is.
+
 **Re-price candidates under their canonical spelling.** A seeded branch
 spells a partial word, which the model rates far below the natural spelling
 of the finished one — measured at 8 nats for `" aprico"` versus `" apricot"`.
 That is an artifact of an unnatural token split, not a statement about
 apricots, so each finished candidate is re-priced under its own tokenization
 and merged in.
+
+**A whole word is often one token the search will never propose.** Pruning
+and seeding both operate on the tree, and neither can reach a word the model
+does not offer. After the default preamble `"Hello"` scores −14.2 against
+`"Here"` at −11.6 — under three nats apart, an entirely reasonable guess — yet
+nowhere near the top-64 the search expands. So typing `hel` returned every
+`"Here ..."` and no `"Hello"`, and adding the `l` made it *worse*, because the
+letter could then only be charged as a slip. The vocabulary already knows the
+word: candidates are found by prefix, priced by a single forward pass whose
+cost does not depend on how many were found, and seeded into the search to
+compete on the same posterior as everything else.
 
 **Search order must not be the sound bound.** Pure A\* on the bound collapses
 to breadth-first, because extending a path only lowers its score — so a
@@ -148,7 +171,7 @@ Useful options:
 | Option | Meaning |
 | --- | --- |
 | `--layout colemak-dh\|qwerty\|none` | which keys count as neighbours when scoring a typo |
-| `--length-bonus` | nats per character; higher prefers longer sentences (`ctrl+s` cycles it live) |
+| `--length-bonus` | how much longer candidates are preferred; saturating, 0 disables (`ctrl+s` cycles it live) |
 | `--max-rounds` | batched forward passes per decode — the wall-clock lever |
 | `--max-chars` | longest candidate to decode |
 
@@ -160,7 +183,7 @@ Press `f1` in the TUI for the keys.
 python -m pytest
 ```
 
-99 tests, no GPU and no download: the search runs against a deterministic fake
+108 tests, no GPU and no download: the search runs against a deterministic fake
 model with a handful of string "tokens" and an explicit probability table,
 which is what makes it possible to assert that three spellings of `"cat"` sum
 to exactly 0.7 and that a pruned branch was never *explored* rather than

@@ -15,13 +15,12 @@ candidates, and each keystroke only re-scores that cached pool through the
 channel. The prior is already known per candidate, so a keystroke costs one
 Levenshtein grid per candidate and nothing else.
 
-**The length bonus.** Candidates of different lengths compete on joint
-probability, and a longer string is always less probable than its own prefix
--- so an honest posterior systematically prefers the shortest completion.
-Since the LM spends roughly a fixed number of nats per character of ordinary
-text, adding back a fixed bonus per character puts long and short candidates
-on comparable footing. It is a display-time preference, not a probability,
-which is why it lives here and not in the search.
+**The length credit.** An honest posterior always prefers the shortest
+completion, so some credit for length has to be added back or every
+suggestion is one word long. It saturates, so that a preference can never
+become the ranking -- see :func:`length_credit`. It is a display-time
+preference rather than a probability, which is why it lives here and not in
+the search.
 """
 
 from __future__ import annotations
@@ -33,15 +32,43 @@ from dataclasses import dataclass
 from .channel import ChannelCosts, match
 from .search import Candidate
 
-__all__ = ["Suggestion", "rerank", "DEFAULT_LENGTH_BONUS"]
+__all__ = ["Suggestion", "rerank", "DEFAULT_LENGTH_BONUS", "length_credit"]
 
-#: Nats per character, added back to offset the prior's length penalty.
-#: Chosen by measurement rather than taste: on "Thanks for the update. I will"
-#: a bonus of 0.0 offers only "look into it"-length completions, 0.8 collapses
-#: onto a single long sentence at 83%, and 0.4 keeps both lengths on the list
-#: ("keep you posted", "get back to you", "look into it") -- which is what
-#: lets a typist choose how much sentence to accept.
-DEFAULT_LENGTH_BONUS = 0.4
+#: Coefficient of the saturating length term (see :func:`length_credit`).
+#: 1.5 by measurement: it is small enough that "hello" still beats a
+#: 27-character candidate that ignores a deliberately typed "l", and large
+#: enough that "get back to you as soon as possible" still outranks "get back
+#: to you" when both match equally well.
+DEFAULT_LENGTH_BONUS = 1.5
+
+
+def length_credit(text: str, coefficient: float) -> float:
+    """How much a candidate's length is worth, in nats.
+
+    Candidates of different lengths compete on joint probability, and a
+    longer string is always less probable than its own prefix -- so an honest
+    posterior systematically prefers the shortest completion, and a list of
+    one-word suggestions is not what anyone wants. Some credit for length has
+    to be added back.
+
+    It has to *saturate*, though, and this was a real bug rather than a
+    refinement. A credit linear in length is unbounded, so past some point it
+    simply decides the ranking: against "hel", a 27-character "Here is what I
+    have written" collected 10.8 nats -- far more than the cost of ignoring
+    the "l" entirely -- so adding a letter to disambiguate made the wrong
+    answer *more* confident. Capping it flat does not work either: a cap low
+    enough to protect the match is also low enough that every sentence hits it
+    and length stops ordering anything.
+
+    A logarithm does both. Going from five characters to twenty-five is worth
+    a lot; from forty to sixty, very little -- which is also how useful the
+    extra text actually is to a typist. And because it grows without bound but
+    ever more slowly, the gap between any two candidates stays small enough
+    that a genuinely better match wins.
+    """
+    if coefficient == 0.0 or not text:
+        return 0.0
+    return coefficient * math.log1p(len(text))
 
 
 @dataclass(frozen=True)
@@ -99,7 +126,7 @@ def rerank(
         result = match(query, cand.text, ch)
         if drop_over_budget and result.cost > budget:
             continue
-        score = cand.logprob - result.cost + length_bonus * len(cand.text)
+        score = cand.logprob - result.cost + length_credit(cand.text, length_bonus)
         scored.append((score, cand, result.cost, result.consumed))
 
     if not scored:
