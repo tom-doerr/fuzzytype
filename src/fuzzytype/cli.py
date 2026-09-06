@@ -19,6 +19,60 @@ from .rank import DEFAULT_LENGTH_BONUS
 __all__ = ["build_parser", "main"]
 
 
+def _add_common(parser: argparse.ArgumentParser, *, suppress: bool = False) -> None:
+    """Options that make sense both before and after the subcommand.
+
+    They are declared twice: once on the top level with real defaults, and
+    once on each subcommand with ``SUPPRESS`` defaults. Without SUPPRESS a
+    subparser's default silently overwrites a value the user gave *before*
+    the subcommand, so ``fuzzytype -k 4 predict`` would quietly ignore the 4.
+    """
+    def default(value):
+        return argparse.SUPPRESS if suppress else value
+
+    parser.add_argument("--model", default=default(DEFAULT_MODEL), help="HF model id")
+    parser.add_argument(
+        "--device", default=default(None), help="cuda, cpu (default: auto)"
+    )
+    parser.add_argument(
+        "--layout",
+        default=default("colemak-dh"),
+        choices=sorted(LAYOUTS),
+        help="keyboard layout, so neighbouring-key typos cost less",
+    )
+    parser.add_argument(
+        "--length-bonus",
+        type=float,
+        default=default(DEFAULT_LENGTH_BONUS),
+        help="nats per character added back to offset the prior's length penalty",
+    )
+    parser.add_argument(
+        "-k", "--top", type=int, default=default(8), help="rows to show"
+    )
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=default(64),
+        help="longest candidate to decode",
+    )
+    parser.add_argument(
+        "--max-rounds",
+        type=int,
+        default=default(12),
+        help="batched forward passes per decode; the wall-clock lever",
+    )
+    parser.add_argument(
+        "--child-top-k",
+        type=int,
+        default=default(64),
+        help=(
+            "next tokens considered per node; generous because top-p truncates "
+            "first, so it costs almost nothing and widens what is reachable"
+        ),
+    )
+    parser.add_argument("--preamble", default=default(DEFAULT_PREAMBLE))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="fuzzytype",
@@ -27,39 +81,16 @@ def build_parser() -> argparse.ArgumentParser:
             "a noisy-channel fuzzy match decides which one you are typing."
         ),
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="HF model id")
-    parser.add_argument("--device", default=None, help="cuda, cpu (default: auto)")
-    parser.add_argument(
-        "--layout",
-        default="colemak-dh",
-        choices=sorted(LAYOUTS),
-        help="keyboard layout, so neighbouring-key typos cost less",
-    )
-    parser.add_argument(
-        "--length-bonus",
-        type=float,
-        default=DEFAULT_LENGTH_BONUS,
-        help="nats per character added back to offset the prior's length penalty",
-    )
-    parser.add_argument("-k", "--top", type=int, default=8, help="rows to show")
-    parser.add_argument(
-        "--max-chars", type=int, default=64, help="longest candidate to decode"
-    )
-    parser.add_argument(
-        "--max-rounds",
-        type=int,
-        default=12,
-        help="batched forward passes per decode; the wall-clock lever",
-    )
-    parser.add_argument(
-        "--child-top-k", type=int, default=24, help="next tokens considered per node"
-    )
-    parser.add_argument("--preamble", default=DEFAULT_PREAMBLE)
+    _add_common(parser)
+    common = argparse.ArgumentParser(add_help=False)
+    _add_common(common, suppress=True)
 
     sub = parser.add_subparsers(dest="command")
 
     p_predict = sub.add_parser(
-        "predict", help="rank the strings a set of keystrokes may have meant"
+        "predict",
+        parents=[common],
+        help="rank the strings a set of keystrokes may have meant",
     )
     p_predict.add_argument("--context", default="", help="text already written")
     p_predict.add_argument("--typed", default="", help="keystrokes since the last word")
@@ -67,7 +98,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--stats", action="store_true", help="also print what the search did"
     )
 
-    p_bench = sub.add_parser("bench", help="time a decode and a keystroke re-rank")
+    p_bench = sub.add_parser(
+        "bench", parents=[common], help="time a decode and a keystroke re-rank"
+    )
     p_bench.add_argument("--context", default="I went to the shop to buy some")
     p_bench.add_argument("--typed", default="")
     p_bench.add_argument("--repeat", type=int, default=3)
@@ -85,7 +118,7 @@ def _engine(args) -> Engine:
             preamble=args.preamble, k=args.top, length_bonus=args.length_bonus
         ),
         predict_config=PredictConfig(
-            k=max(args.top * 5, 40),
+            k=max(args.top * 20, 160),
             max_chars=args.max_chars,
             max_rounds=args.max_rounds,
             child_top_k=args.child_top_k,

@@ -59,3 +59,27 @@ def test_parsing_arguments_does_not_import_torch():
         "sys.exit(1 if 'torch' in sys.modules else 0)" % str(SRC)
     )
     assert subprocess.run([sys.executable, "-c", probe]).returncode == 0
+
+
+def test_common_options_work_on_either_side_of_the_subcommand():
+    """`fuzzytype predict -k 4` and `fuzzytype -k 4 predict` must agree.
+
+    argparse silently loses the second form unless the subparser's copies
+    default to SUPPRESS: the subparser's own default overwrites whatever was
+    parsed before the subcommand.
+    """
+    parser = build_parser()
+    assert parser.parse_args(["predict", "-k", "4"]).top == 4
+    assert parser.parse_args(["-k", "4", "predict"]).top == 4
+    assert parser.parse_args(["predict"]).top == 8  # the shared default
+
+
+def test_search_width_defaults_match_the_library():
+    """A narrower CLI default silently under-searched: "th wthr hs bn" found
+    "The week has been" instead of "The weather has been"."""
+    from fuzzytype.search import PredictConfig
+
+    args = build_parser().parse_args([])
+    assert args.child_top_k == PredictConfig().child_top_k
+    assert args.max_rounds == PredictConfig().max_rounds
+    assert args.max_chars == PredictConfig().max_chars

@@ -103,9 +103,13 @@ Measured on a DGX Spark (GB10), `Qwen/Qwen3.5-0.8B-Base` in bf16:
 
 | | |
 | --- | --- |
-| keystroke → updated ranking | **~1 ms** (pure Python, no GPU) |
-| background decode of a new pool | ~1–3 s, 130–170 candidates |
+| keystroke → updated ranking | **~5 ms** typical, ~16 ms worst case (pure Python, no GPU) |
+| background decode of a new pool | ~1.7–3 s, 130–190 candidates |
 | model load | ~20 s, once |
+
+Re-ranking is `O(pool × query length × candidate length)`, so the worst case is
+a long query against a full pool of sentence-length candidates — still inside a
+single frame.
 
 The two clocks are why the architecture looks the way it does. Every
 keystroke re-ranks a **cached pool** — the prior is already known per

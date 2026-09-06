@@ -411,7 +411,7 @@ def run_tui(args) -> int:
             preamble=args.preamble, k=args.top, length_bonus=args.length_bonus
         ),
         predict_config=PredictConfig(
-            k=max(args.top * 8, 60),
+            k=max(args.top * 20, 160),
             max_chars=args.max_chars,
             max_rounds=args.max_rounds,
             child_top_k=args.child_top_k,
