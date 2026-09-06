@@ -68,8 +68,17 @@ Prompt mode is markedly more confident wherever the input is genuinely
 shorthand, and it finds more candidates per decode — at roughly 1.5× the time,
 because the prompt makes every forward pass longer. It is also less literal
 about single fragments: it reads `hel` as shorthand for `help` before `hello`,
-which is defensible but not always what you meant. The channel can be layered
-on top with `--channel-assist`.
+which is defensible but not always what you meant.
+
+**The channel still runs underneath it**, at reduced weight. The prompt on its
+own never insists that a candidate account for *all* the keystrokes, so
+`thiisatest` came back as `this test` at 57% with nothing to say the rest had
+been ignored — and with no channel cost there is no match quality to show and
+nothing to highlight. But at full strength the shorthand gets counted twice
+and literal echoes win: `thisisatest` and `theisatest` climb to 12% and 8%.
+Measured across that range, **0.6** keeps `this is test` and `this is a test`
+on top without either failure. Tune with `--channel-weight`, or switch it off
+with `--no-channel-assist`.
 
 ## How it works
 
@@ -302,7 +311,7 @@ Press `f1` in the TUI for the keys.
 python -m pytest
 ```
 
-141 tests, no GPU and no download: the search runs against a deterministic fake
+142 tests, no GPU and no download: the search runs against a deterministic fake
 model with a handful of string "tokens" and an explicit probability table,
 which is what makes it possible to assert that three spellings of `"cat"` sum
 to exactly 0.7 and that a pruned branch was never *explored* rather than

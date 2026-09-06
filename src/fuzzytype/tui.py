@@ -612,6 +612,7 @@ def run_tui(args) -> int:
             length_bonus=args.length_bonus,
             mode=args.mode,
             channel_assist=args.channel_assist,
+            channel_weight=args.channel_weight,
         ),
         predict_config=PredictConfig(
             k=max(args.top * 20, 160),

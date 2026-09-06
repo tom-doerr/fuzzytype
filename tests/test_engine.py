@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from fake_lm import cat_lm
 
-from fuzzytype.channel import ChannelCosts
+import pytest
+
+from fuzzytype.channel import ChannelCosts, match
 from fuzzytype.engine import Engine, EngineConfig
 from fuzzytype.search import Candidate, PredictConfig
 from fuzzytype.shorthand import build_prompt
@@ -164,16 +166,44 @@ def test_prompt_mode_puts_the_keystrokes_in_the_prompt():
     assert prompt.rstrip().endswith("full text:")
 
 
-def test_prompt_mode_does_not_score_the_keystrokes_twice():
-    """The prior already accounts for them; the channel would double count."""
-    engine = _prompt_engine()
-    engine.pool = [Candidate("cat", " cat", -1.0, 0.0, 0, 1, ())]
-    scored, _ = engine.suggest("zzzz")
-    assert scored, "an unrelated query must not be filtered out by the channel"
+def test_prompt_mode_weighs_the_channel_partially():
+    """The prompt has already seen the shorthand, so the channel is a second
+    opinion rather than a fresh one.
 
-    assisted = _prompt_engine(channel_assist=True)
-    assisted.pool = list(engine.pool)
-    assert assisted.suggest("zzzz")[0] == []
+    Switched off entirely, nothing insists a candidate account for *all* the
+    keystrokes: "thiisatest" came back as "this test" at 57%. At full strength
+    the same evidence is counted twice and literal echoes of the shorthand
+    win -- "thisisatest" and "theisatest" took 12% and 8%. Measured, 0.6 keeps
+    "this is test" and "this is a test" on top without either failure.
+    """
+    engine = _prompt_engine()
+    weight = engine.config.channel_weight
+    assert 0.0 < weight < 1.0
+
+    candidate = Candidate("cat", " cat", -1.0, 0.0, 0, 1, ())
+    cost = match("cx", "cat", engine.costs).cost
+    assert cost > 0.0
+
+    engine.pool = [candidate]
+    weighted = engine.suggest("cx")[0][0].score
+
+    off = _prompt_engine(channel_assist=False)
+    off.pool = [candidate]
+    ignored = off.suggest("cx")[0][0].score
+
+    assert ignored - weighted == pytest.approx(weight * cost)
+
+
+def test_channel_mode_applies_the_channel_in_full():
+    """There it is the only account of the keystrokes."""
+    engine = _engine()
+    candidate = Candidate("cat", " cat", -1.0, 0.0, 0, 1, ())
+    cost = match("cx", "cat", engine.costs).cost
+    engine.pool = [candidate]
+    scored = engine.suggest("cx")[0][0].score
+    off = _engine()
+    off.pool = [candidate]
+    assert off.suggest("")[0][0].score - scored == pytest.approx(cost)
 
 
 def _with_fake_prompt(engine):

@@ -64,10 +64,18 @@ class EngineConfig:
     #: "channel" ranks by a hand-calibrated typing model; "prompt" asks the
     #: language model to expand the shorthand itself. See fuzzytype.shorthand.
     mode: str = "channel"
-    #: In prompt mode, also apply the channel when ranking. The prompt already
-    #: conditions on the keystrokes, so this is a second opinion rather than
-    #: the deciding one.
-    channel_assist: bool = False
+    #: In prompt mode, also apply the channel when ranking. On by default: the
+    #: prompt alone does not insist that a candidate account for *all* the
+    #: keystrokes, so "thiisatest" came back as "this test" at 57% with
+    #: nothing to say the rest had been ignored -- and with no channel cost
+    #: there is no match quality to show and nothing to highlight either.
+    channel_assist: bool = True
+    #: How much of the channel to apply when assisting. The prompt has already
+    #: seen the shorthand, so a full-strength channel counts it twice and
+    #: literal echoes win: at weight 1.0 "thisisatest" and "theisatest" take
+    #: 12% and 8%. At 0.6 the ranking prefers "this is test" and "this is a
+    #: test" while the echoes stay down.
+    channel_weight: float = 0.6
     #: Prompt mode's context window. The prompt carries worked examples, so it
     #: needs considerably more room than a bare continuation.
     max_prompt_tokens: int = 640
@@ -250,15 +258,17 @@ class Engine:
 
     def suggest(self, query: str, k: int | None = None) -> tuple[list[Suggestion], float]:
         """Rank the cached pool against the keystrokes. Fast; safe on the UI thread."""
-        # In prompt mode the prior already accounts for the keystrokes, so
-        # scoring them a second time would double-count the same evidence.
-        scored = query if self.config.mode != "prompt" or self.config.channel_assist else ""
+        prompt_mode = self.config.mode == "prompt"
+        scored = query if not prompt_mode or self.config.channel_assist else ""
         return rerank(
             self.pool,
             scored,
             self.costs,
             length_bonus=self.config.length_bonus,
             k=self.config.k if k is None else k,
+            # The channel is the only account of the keystrokes in channel
+            # mode, and a partial second opinion in prompt mode.
+            cost_weight=self.config.channel_weight if prompt_mode else 1.0,
         )
 
     def needs_refresh(self, query: str) -> bool:

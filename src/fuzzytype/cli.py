@@ -80,10 +80,17 @@ def _add_common(parser: argparse.ArgumentParser, *, suppress: bool = False) -> N
         ),
     )
     parser.add_argument(
-        "--channel-assist",
-        action="store_true",
-        default=default(False),
-        help="in prompt mode, also score the keystrokes with the channel",
+        "--no-channel-assist",
+        action="store_false",
+        dest="channel_assist",
+        default=default(True),
+        help="in prompt mode, rank on the model's probabilities alone",
+    )
+    parser.add_argument(
+        "--channel-weight",
+        type=float,
+        default=default(0.6),
+        help="how much of the channel to apply in prompt mode (0 disables)",
     )
     parser.add_argument("--preamble", default=default(DEFAULT_PREAMBLE))
 
@@ -135,6 +142,7 @@ def _engine(args) -> Engine:
             length_bonus=args.length_bonus,
             mode=args.mode,
             channel_assist=args.channel_assist,
+            channel_weight=args.channel_weight,
         ),
         predict_config=PredictConfig(
             k=max(args.top * 20, 160),

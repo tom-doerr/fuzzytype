@@ -112,8 +112,14 @@ def rerank(
     length_bonus: float = DEFAULT_LENGTH_BONUS,
     k: int | None = None,
     drop_over_budget: bool = True,
+    cost_weight: float = 1.0,
 ) -> tuple[list[Suggestion], float]:
     """Re-score a cached pool against the keystrokes typed so far.
+
+    ``cost_weight`` scales the channel's contribution. It is 1 when the
+    channel is the only account of the keystrokes, and less when the prior
+    already knows about them -- prompt mode puts the shorthand in the prompt,
+    so charging the full channel on top counts the same evidence twice.
 
     Returns the ranked suggestions and the fraction of the found posterior
     mass they carry.
@@ -126,7 +132,11 @@ def rerank(
         result = match(query, cand.text, ch)
         if drop_over_budget and result.cost > budget:
             continue
-        score = cand.logprob - result.cost + length_credit(cand.text, length_bonus)
+        score = (
+            cand.logprob
+            - cost_weight * result.cost
+            + length_credit(cand.text, length_bonus)
+        )
         scored.append((score, cand, result.cost, result.consumed))
 
     if not scored:
