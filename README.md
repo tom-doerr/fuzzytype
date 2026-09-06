@@ -189,6 +189,28 @@ prior-spent-per-keystroke-covered. That estimate can be wrong, so it is
 confined to the heap order — pruning and stopping keep using the admissible
 bound, and a bad estimate can only cost time, never a candidate.
 
+## Long shorthand is taken in pieces
+
+A candidate does not have to account for *everything* you have typed. The
+keystrokes it does not reach are not mistakes — they are the rest of the
+sentence, for the next suggestion to take — so accepting a suggestion consumes
+only the keystrokes it read and leaves the remainder standing.
+
+This was the difference between working and not. Charged as spurious
+keystrokes at 6 nats each, a correct prefix of a 33-character shorthand cost
+**132.6 nats** and could never be offered at all; nothing could be accepted
+until one candidate covered the whole sentence at once, and the search would
+sit at *one* candidate after forty rounds. Now the same input finds 234, and
+the first accept reads 24 of the 33 keystrokes.
+
+The charge is affine, for the same reason gaps are: a flat rate cannot be both
+dear enough that ignoring the `l` you just typed in `hel` means something, and
+cheap enough that ignoring the last nineteen characters of a long shorthand
+does not. And `tail_extend` is really the credit for each keystroke a
+candidate *does* read, so it has to exceed what reading one costs — at 1.2 the
+ranking preferred `Thi|s week`, having read three keystrokes; at 3.0 it gives
+`This is the start of the next section`, having read twenty-four.
+
 ## What it does not do yet
 
 Dense multi-word abbreviation with no separators does not reliably resolve.

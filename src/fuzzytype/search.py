@@ -52,6 +52,7 @@ from .channel import (
     Grid,
     grid_values,
     initial_column,
+    partial_cost,
     push_candidate_char,
 )
 from .lm import LanguageModel
@@ -96,6 +97,9 @@ class Candidate:
     logprob: float  # log P(text | context), merged over spellings
     cost: float  # -log P(keystrokes | text)
     consumed: int
+    #: Keystrokes this candidate accounts for. Accepting it consumes exactly
+    #: these, leaving the rest for whatever is suggested next.
+    keystrokes: int
     n_paths: int
     tokens: tuple[int, ...]
 
@@ -334,6 +338,7 @@ class _Merged:
     tokens: tuple[int, ...] = ()
     cost: float = 0.0
     consumed: int = 0
+    keystrokes: int = 0
     n_paths: int = 0
     #: Every token spelling already counted, so no probability is added twice.
     paths: set[tuple[int, ...]] = field(default_factory=set)
@@ -612,7 +617,8 @@ def _collect(merged: dict[str, _Merged], k: int) -> list[Candidate]:
     candidates = [
         Candidate(
             text=key, raw=m.raw, logprob=m.total, cost=m.cost,
-            consumed=m.consumed, n_paths=m.n_paths, tokens=m.tokens,
+            consumed=m.consumed, keystrokes=m.keystrokes,
+            n_paths=m.n_paths, tokens=m.tokens,
         )
         for key, m in merged.items()
     ]
@@ -752,9 +758,27 @@ def predict(
                 )
 
                 key = _emission_key(node.text, child.text)
-                if key is not None and child.best_cost <= budget:
+                if key is not None:
+                    # A candidate need only account for *part* of what has
+                    # been typed: the rest is the next suggestion's job, not a
+                    # mistake. Charging it as error made every correct prefix
+                    # of a long shorthand unofferable.
+                    offered, covered = partial_cost(
+                        child.column, len(query), ch_costs
+                    )
+                else:
+                    offered, covered = 0.0, 0
+                # The budget bounds *errors*, and keystrokes left for later
+                # are not errors, so they are taken back out before the test.
+                errors = offered - ch_costs.tail_charge(len(query) - covered)
+                if (
+                    key is not None
+                    and errors <= ch_costs.budget(covered)
+                    and (covered > 0 or not query)
+                ):
                     entry = merged.setdefault(key, _Merged())
-                    entry.cost = child.best_cost
+                    entry.cost = offered
+                    entry.keystrokes = covered
                     entry.consumed = min(child.best_consumed, len(key))
                     entry.add(
                         child_lp,

@@ -80,6 +80,8 @@ class Suggestion:
     logprob: float  # log P(text | context)
     cost: float  # -log P(keystrokes | text)
     consumed: int  # characters of `text` the keystrokes explain
+    #: Keystrokes accounted for. Accepting consumes exactly these.
+    keystrokes: int
     score: float  # log posterior, including any length bonus
     probability: float  # normalised over the candidate set
     n_paths: int
@@ -127,23 +129,28 @@ def rerank(
     ch = costs or ChannelCosts()
     budget = ch.budget(len(query))
 
-    scored: list[tuple[float, Candidate, float, int]] = []
+    scored: list[tuple[float, Candidate, float, int, int]] = []
     for cand in candidates:
         result = match(query, cand.text, ch)
-        if drop_over_budget and result.cost > budget:
+        if query and result.keystrokes == 0:
+            continue  # accounts for nothing that was typed
+        errors = result.cost - ch.tail_charge(len(query) - result.keystrokes)
+        if drop_over_budget and errors > ch.budget(result.keystrokes):
             continue
         score = (
             cand.logprob
             - cost_weight * result.cost
             + length_credit(cand.text, length_bonus)
         )
-        scored.append((score, cand, result.cost, result.consumed))
+        scored.append(
+            (score, cand, result.cost, result.consumed, result.keystrokes)
+        )
 
     if not scored:
         return [], 0.0
 
-    top = max(s for s, _, _, _ in scored)
-    total = sum(math.exp(s - top) for s, _, _, _ in scored)
+    top = max(item[0] for item in scored)
+    total = sum(math.exp(item[0] - top) for item in scored)
     scored.sort(key=lambda item: (-item[0], item[1].text))
 
     out = [
@@ -153,11 +160,12 @@ def rerank(
             logprob=cand.logprob,
             cost=cost,
             consumed=min(consumed, len(cand.text)),
+            keystrokes=keystrokes,
             score=score,
             probability=math.exp(score - top) / total,
             n_paths=cand.n_paths,
         )
-        for score, cand, cost, consumed in scored
+        for score, cand, cost, consumed, keystrokes in scored
     ]
     shown = out if k is None else out[:k]
     return shown, sum(s.probability for s in shown)

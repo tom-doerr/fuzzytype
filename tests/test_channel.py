@@ -61,12 +61,26 @@ def test_a_real_abbreviation_beats_a_coincidence():
     meant = match("helhay", "hello how are you", near)
     coincidence = match("helhay", "Here you go", near)
     assert meant.cost < coincidence.cost
-    # ...and it is read as the real alignment, not as a truncated prefix.
-    assert meant.consumed > len("hello ")
+    # It may account for only the first few keystrokes and leave the rest for
+    # the next suggestion -- that is the intended way to take a long
+    # shorthand -- but it must account for at least as many as the
+    # coincidence does.
+    assert meant.keystrokes >= coincidence.keystrokes
 
 
-def test_a_spurious_keystroke_costs_a_deletion():
-    assert match("thex", "the", COSTS).cost == pytest.approx(COSTS.delete)
+def test_a_spurious_keystroke_in_the_middle_is_corrected_through():
+    """It costs a deletion, and the match carries on past it.
+
+    A trailing stray keystroke is different: it is left unread instead, on
+    the assumption that it starts whatever comes next.
+    """
+    middle = match("thxe", "the", COSTS)
+    assert middle.cost == pytest.approx(COSTS.delete)
+    assert middle.keystrokes == 4, "the match should continue past the slip"
+
+    trailing = match("thex", "the", COSTS)
+    assert trailing.cost == pytest.approx(COSTS.tail_charge(1))
+    assert trailing.keystrokes == 3
 
 
 def test_wrong_case_is_much_cheaper_than_a_wrong_letter():

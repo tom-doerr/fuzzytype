@@ -33,7 +33,7 @@ def test_accepting_a_suggestion_appends_it_and_invalidates_the_pool():
     engine = _engine()
     engine.text = "I saw"
     engine.pool = [
-        Candidate(" a cat", " a cat", -1.0, 0.0, 0, 1, ())
+        Candidate(" a cat", " a cat", -1.0, 0.0, 0, 0, 1, ())
     ]
     engine.commit(" a cat")
     assert engine.text == "I saw a cat"
@@ -105,7 +105,7 @@ def test_context_is_truncated_to_bound_the_forward_pass():
 def test_backspacing_committed_text_invalidates_the_pool():
     engine = _engine()
     engine.text = "hello"
-    engine.pool = [Candidate("x", " x", -1.0, 0.0, 0, 1, ())]
+    engine.pool = [Candidate("x", " x", -1.0, 0.0, 0, 0, 1, ())]
     engine.backspace_text()
     assert engine.text == "hell"
     assert engine.pool == []
@@ -180,7 +180,7 @@ def test_prompt_mode_weighs_the_channel_partially():
     weight = engine.config.channel_weight
     assert 0.0 < weight < 1.0
 
-    candidate = Candidate("cat", " cat", -1.0, 0.0, 0, 1, ())
+    candidate = Candidate("cat", " cat", -1.0, 0.0, 0, 0, 1, ())
     cost = match("cx", "cat", engine.costs).cost
     assert cost > 0.0
 
@@ -197,7 +197,7 @@ def test_prompt_mode_weighs_the_channel_partially():
 def test_channel_mode_applies_the_channel_in_full():
     """There it is the only account of the keystrokes."""
     engine = _engine()
-    candidate = Candidate("cat", " cat", -1.0, 0.0, 0, 1, ())
+    candidate = Candidate("cat", " cat", -1.0, 0.0, 0, 0, 1, ())
     cost = match("cx", "cat", engine.costs).cost
     engine.pool = [candidate]
     scored = engine.suggest("cx")[0][0].score
@@ -220,8 +220,8 @@ def _with_fake_prompt(engine):
 def test_rescoring_reprices_without_searching_again():
     engine = _with_fake_prompt(_prompt_engine())
     engine.pool = [
-        Candidate("cat", " cat", -99.0, 0.0, 0, 1, ()),
-        Candidate("car", " car", -99.0, 0.0, 0, 1, ()),
+        Candidate("cat", " cat", -99.0, 0.0, 0, 0, 1, ()),
+        Candidate("car", " car", -99.0, 0.0, 0, 0, 1, ()),
     ]
     assert engine.rescore("ca") == 2
     assert all(c.logprob > -99.0 for c in engine.pool)
@@ -233,8 +233,8 @@ def test_rescoring_reprices_without_searching_again():
 def test_rescoring_is_bounded_and_drops_the_tail():
     engine = _with_fake_prompt(_prompt_engine(max_rescore=1))
     engine.pool = [
-        Candidate("cat", " cat", -1.0, 0.0, 0, 1, ()),
-        Candidate("car", " car", -2.0, 0.0, 0, 1, ()),
+        Candidate("cat", " cat", -1.0, 0.0, 0, 0, 1, ()),
+        Candidate("car", " car", -2.0, 0.0, 0, 0, 1, ()),
     ]
     assert engine.rescore("ca") == 1
     assert len(engine.pool) == 1
@@ -243,7 +243,7 @@ def test_rescoring_is_bounded_and_drops_the_tail():
 def test_channel_mode_does_not_rescore():
     """Its priors do not depend on the keystrokes, so there is nothing to do."""
     engine = _engine()
-    engine.pool = [Candidate("cat", " cat", -1.0, 0.0, 0, 1, ())]
+    engine.pool = [Candidate("cat", " cat", -1.0, 0.0, 0, 0, 1, ())]
     assert engine.rescore("ca") == 0
 
 

@@ -14,7 +14,7 @@ COSTS = ChannelCosts()
 def _candidate(text, logprob):
     return Candidate(
         text=text, raw=" " + text, logprob=logprob, cost=0.0,
-        consumed=0, n_paths=1, tokens=(),
+        consumed=0, keystrokes=0, n_paths=1, tokens=(),
     )
 
 

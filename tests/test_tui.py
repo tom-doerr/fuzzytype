@@ -310,7 +310,7 @@ def test_moving_back_predicts_from_the_new_position():
 
     async def steps(app, pilot):
         app.engine.text = "hello there"
-        app.engine.pool = [Candidate("x", " x", -1.0, 0.0, 0, 1, ())]
+        app.engine.pool = [Candidate("x", " x", -1.0, 0.0, 0, 0, 1, ())]
         await pilot.press("left")
         await pilot.pause()
         return app.engine.pool

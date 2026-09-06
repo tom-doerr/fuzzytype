@@ -59,6 +59,7 @@ __all__ = [
     "initial_row",
     "push_query_char",
     "grid_values",
+    "partial_cost",
     "match",
 ]
 
@@ -114,9 +115,36 @@ class ChannelCosts:
 
     substitute: float = 4.0  # ~1.8% -- an unrelated wrong letter
     substitute_near: float = 2.6  # ~7%  -- a neighbouring key
-    delete: float = 6.0  # a keystroke nothing explains -- deliberately dear
+    #: A keystroke nothing explains, in the *middle* of a match. It used to be
+    #: 6.0 to make an added letter count for something, but the unread-tail
+    #: charge carries that now -- and at 6.0 it had become dearer than simply
+    #: stopping early, so a typo in the middle of a word truncated the match
+    #: instead of being corrected through.
+    delete: float = 4.5
     skip_open: float = 2.0  # starting to leave characters out
     skip_extend: float = 0.35  # ...and continuing to, which is nearly free
+    #: What it costs to leave the rest of the keystrokes unread *for now*.
+    #: Trailing keystrokes a candidate does not reach are not mistakes -- they
+    #: are the rest of what is being typed, for the next suggestion to take.
+    #: Billed as spurious keystrokes at 6.0 each, "this is a test" cost 132.6
+    #: nats against a 33-character shorthand and could never be offered at
+    #: all, so nothing could be accepted until a single candidate covered the
+    #: whole sentence at once.
+    #:
+    #: Affine for the same reason gaps are. A flat rate cannot be both things
+    #: at once: dear enough that ignoring the "l" you just typed in "hel"
+    #: means something, and cheap enough that ignoring the last nineteen
+    #: characters of a long shorthand does not. Stopping early is one
+    #: decision, not nineteen.
+    #: ``tail_extend`` is really the credit for each keystroke a candidate
+    #: *does* read, so it has to exceed what reading one costs -- roughly 1.5
+    #: to 2.5 nats of gap in dense shorthand. Below that the ranking prefers
+    #: to stop early and read almost nothing: against a 33-character
+    #: shorthand, 1.2 put "Thi|s week" on top having read three keystrokes,
+    #: while 3.0 gives "This is the start of the next section" having read
+    #: twenty-four.
+    tail_open: float = 4.0
+    tail_extend: float = 3.0
     case: float = 0.4  # right letter, wrong case
     #: Total error tolerated before a branch is abandoned. It grows with the
     #: query because a longer abbreviation opens more gaps.
@@ -130,6 +158,12 @@ class ChannelCosts:
 
     def budget(self, query_len: int) -> float:
         return self.budget_base + self.budget_per_char * query_len
+
+    def tail_charge(self, unread: int) -> float:
+        """Cost of stopping this candidate with ``unread`` keystrokes to go."""
+        if unread <= 0:
+            return 0.0
+        return self.tail_open + self.tail_extend * (unread - 1)
 
     def substitution(self, typed: str, intended: str) -> float:
         """Cost of the typist producing ``typed`` when meaning ``intended``."""
@@ -154,6 +188,9 @@ class MatchResult:
 
     cost: float
     consumed: int
+    #: How many keystrokes this candidate accounts for. Accepting it consumes
+    #: exactly these, leaving the rest to be matched by what comes next.
+    keystrokes: int = 0
 
     @property
     def likelihood(self) -> float:
@@ -234,22 +271,51 @@ def push_query_char(grid: Grid, candidate: str, ch: str, costs: ChannelCosts) ->
     return (tuple(a_new), tuple(b_new))
 
 
-def _best(grid: Grid) -> MatchResult:
-    """Best alignment of the whole query against any *prefix* of the candidate.
+def partial_cost(
+    grid: Grid, query_len: int, costs: ChannelCosts
+) -> tuple[float, int]:
+    """Cheapest way to account for *some* leading part of the keystrokes.
 
-    Taking the minimum over j is what makes the untyped tail free.
+    Used by the search to decide whether a finished candidate is worth
+    offering. It reads one column, so the candidate's own characters are all
+    charged; the exact figure, with the predicted tail free, is recomputed
+    when the candidate is ranked.
     """
     values = grid_values(grid)
-    best_j, best = 0, values[0]
-    for j in range(1, len(values)):
-        if values[j] < best:
-            best, best_j = values[j], j
-    return MatchResult(cost=best, consumed=best_j)
+    best, keystrokes = INF, 0
+    for covered, cost in enumerate(values):
+        total = cost + costs.tail_charge(query_len - covered)
+        if total < best:
+            best, keystrokes = total, covered
+    return best, keystrokes
 
 
 def match(query: str, candidate: str, costs: ChannelCosts) -> MatchResult:
-    """-log P(query | candidate), plus how much of the candidate was typed."""
-    grid = initial_row(len(candidate), costs)
+    """-log P(query | candidate), and how much of each side it accounts for.
+
+    Both tails are cheap, and for the same reason. Candidate characters past
+    what was typed are free -- that is the prediction. Keystrokes past what
+    the candidate reaches cost ``costs.tail`` each, because they are not
+    errors either: they are the rest of the sentence, waiting for the next
+    suggestion to take them.
+
+    So the alignment is chosen over *both* axes: how many keystrokes to
+    account for, and how much of the candidate to spend doing it.
+    """
+    rows = [initial_row(len(candidate), costs)]
     for ch in query:
-        grid = push_query_char(grid, candidate, ch, costs)
-    return _best(grid)
+        rows.append(push_query_char(rows[-1], candidate, ch, costs))
+
+    best = MatchResult(cost=INF, consumed=0, keystrokes=0)
+    for keystrokes, grid in enumerate(rows):
+        values = grid_values(grid)
+        consumed, cost = 0, values[0]
+        for j in range(1, len(values)):
+            if values[j] < cost:
+                cost, consumed = values[j], j
+        total = cost + costs.tail_charge(len(query) - keystrokes)
+        if total < best.cost:
+            best = MatchResult(
+                cost=total, consumed=consumed, keystrokes=keystrokes
+            )
+    return best

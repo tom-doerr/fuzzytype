@@ -431,10 +431,18 @@ class FuzzyTypeApp(App):
         self.action_accept_row(self.selected)
 
     def action_accept_row(self, index: int) -> None:
+        """Accept a suggestion, consuming only the keystrokes it accounts for.
+
+        A long shorthand is taken in pieces. Typing the whole sentence and
+        accepting "this is a test" leaves "ofthenewtextinputsystem" still
+        typed, ready for the next suggestion, rather than throwing away the
+        part that has not been read yet.
+        """
         if index >= len(self._suggestions):
             return
-        self.engine.commit(self._suggestions[index].raw)
-        self.query = ""
+        chosen = self._suggestions[index]
+        self.engine.commit(chosen.raw)
+        self.query = self.query[chosen.keystrokes :]
         self.cursor = 0
         self.selected = 0
         self._request_decode()
