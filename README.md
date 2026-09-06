@@ -277,12 +277,22 @@ Useful options:
 
 ### Editing
 
-`left` / `right` move the caret through what you are typing, and keep going
-into text you have already accepted — the suggestions follow, so going back to
-fix an earlier word predicts for *that* point in the sentence rather than the
-end. `home` / `end` jump to either side, `backspace` and `delete` cut behind
-and ahead. Text to the right of the caret is carried along untouched; a causal
-model cannot condition on it, so it is preserved rather than predicted around.
+`left` / `right` move the cursor through what you are typing, and keep going
+into text you have already accepted. The suggestions follow it: go back to fix
+an earlier word and you get suggestions for *that* point in the sentence
+rather than the end.
+
+```
+I went to the shop to buy some ▏bread and
+└──── behind the cursor ──────┘ └─ ahead ─┘
+```
+
+Everything behind the cursor is what the model reads and continues from.
+Everything ahead is kept exactly as it is and re-attached afterwards, but it
+does not affect the suggestions — the model can only read forwards.
+
+`home` / `end` jump to either side; `backspace` and `delete` cut behind and
+ahead.
 
 Press `f1` in the TUI for the keys.
 

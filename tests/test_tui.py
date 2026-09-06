@@ -233,31 +233,31 @@ def test_a_failed_model_load_can_be_retried():
     assert tries >= 2, "ctrl+r should have tried the model again"
 
 
-def test_the_caret_moves_inside_the_keystrokes():
+def test_the_cursor_moves_inside_the_keystrokes():
     async def steps(app, pilot):
         await pilot.press("c", "a", "t")
         await pilot.press("left", "left")
         await pilot.pause()
-        return app.query, app.caret
+        return app.query, app.cursor
 
-    query, caret = _drive(steps)
-    assert (query, caret) == ("cat", 1)
+    query, cursor = _drive(steps)
+    assert (query, cursor) == ("cat", 1)
 
 
-def test_typing_inserts_at_the_caret():
+def test_typing_inserts_at_the_cursor():
     async def steps(app, pilot):
         await pilot.press("c", "t")
         await pilot.press("left")
         await pilot.press("a")
         await pilot.pause()
-        return app.query, app.caret
+        return app.query, app.cursor
 
-    query, caret = _drive(steps)
+    query, cursor = _drive(steps)
     assert query == "cat"
-    assert caret == 2
+    assert cursor == 2
 
 
-def test_backspace_deletes_behind_the_caret_not_at_the_end():
+def test_backspace_deletes_behind_the_cursor_not_at_the_end():
     async def steps(app, pilot):
         await pilot.press("c", "x", "t")
         await pilot.press("left")       # between x and t
@@ -268,30 +268,30 @@ def test_backspace_deletes_behind_the_caret_not_at_the_end():
     assert _drive(steps) == "ct"
 
 
-def test_delete_removes_ahead_of_the_caret():
+def test_delete_removes_ahead_of_the_cursor():
     async def steps(app, pilot):
         await pilot.press("c", "a", "t")
         await pilot.press("home", "delete")
         await pilot.pause()
-        return app.query, app.caret
+        return app.query, app.cursor
 
-    query, caret = _drive(steps)
-    assert (query, caret) == ("at", 0)
+    query, cursor = _drive(steps)
+    assert (query, cursor) == ("at", 0)
 
 
 def test_home_and_end_jump_to_either_side():
     async def steps(app, pilot):
         await pilot.press("c", "a", "t", "home")
         await pilot.pause()
-        start = app.caret
+        start = app.cursor
         await pilot.press("end")
         await pilot.pause()
-        return start, app.caret
+        return start, app.cursor
 
     assert _drive(steps) == (0, 3)
 
 
-def test_the_caret_walks_on_into_committed_text():
+def test_the_cursor_walks_on_into_committed_text():
     """Past the keystrokes, left keeps going -- and the context follows it."""
 
     async def steps(app, pilot):
@@ -329,7 +329,7 @@ def test_right_walks_back_out_again():
     assert _drive(steps) == ("hello ther", "e")
 
 
-def test_accepting_a_suggestion_inserts_at_the_caret():
+def test_accepting_a_suggestion_inserts_at_the_cursor():
     async def steps(app, pilot):
         app.engine.text = "cat sat"
         app.engine.after = " on it"
@@ -338,4 +338,4 @@ def test_accepting_a_suggestion_inserts_at_the_caret():
 
     text, after = _drive(steps)
     assert text == "cat sat here"
-    assert after == " on it", "text after the caret stays put"
+    assert after == " on it", "text after the cursor stays put"

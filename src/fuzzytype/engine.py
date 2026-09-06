@@ -279,7 +279,7 @@ class Engine:
         if not self.text:
             raw = raw.lstrip()
         elif self.text.endswith((" ", "\t")) and raw.startswith(" "):
-            # The caret can sit just after a space; candidates carry their own.
+            # The cursor can sit just after a space; candidates carry their own.
             raw = raw.lstrip(" ")
         self.text += raw
         self._invalidate()
