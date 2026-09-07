@@ -22,7 +22,7 @@ class TopK:
     """Truncated next-token distribution at one position.
 
     ``kept_mass`` is the probability of the tokens actually returned --
-    including any requested by ``extra_ids`` -- reported rather than discarded
+    including any selected for beginning the way the keystrokes do -- reported
     so callers can distinguish "the model was confident" from "we threw away
     half the distribution to keep the search small".
 
@@ -82,32 +82,16 @@ class LanguageModel(Protocol):
         *,
         top_k: int,
         top_p: float,
-        extra_ids: Sequence[Sequence[int]] | None = None,
-        extra_keep: int = 0,
+        match_chars: Sequence[str | None] | None = None,
+        match_top_k: int = 0,
     ) -> list[TopK]:
         """Truncated next-token distributions, one per input sequence.
 
-        ``extra_ids`` proposes tokens to include whatever their rank -- the
-        words matching the keystrokes still unexplained -- of which the best
-        ``extra_keep`` are returned. Proposing is cheap and the model does
-        the choosing.
+        Where ``match_chars`` names the letter a row's next word must begin
+        with, a second top-k is taken over only the tokens beginning that way
+        and unioned in. Both are exact top-k over the whole distribution, so
+        nothing is repriced -- only more of the right part of it is seen.
         """
-        ...
-
-    def tokens_with_prefix(self, prefix: str, limit: int = 512) -> list[int]:
-        """Token ids whose text starts with ``prefix``, ignoring case and space.
-
-        A whole word is often a single token that the model ranks far below
-        the search's cut-off while still being a good guess, so the search
-        cannot reach it by walking the tree. Asking the vocabulary directly
-        is what makes typing "hel" able to reach "Hello".
-        """
-        ...
-
-    def token_logprobs(
-        self, sequence: Sequence[int], token_ids: Sequence[int]
-    ) -> list[float]:
-        """log P(token | sequence) for specific tokens, in one forward pass."""
         ...
 
     def sequence_logprobs(

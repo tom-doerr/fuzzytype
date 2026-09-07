@@ -147,18 +147,61 @@ that disagree with your keystrokes are abandoned after one token, branches
 that agree are decoded many tokens deep. The unpromising strings are never
 decoded at all.
 
-### Six things that were not obvious
+### Four things that were not obvious
 
 Each of these was a bug found by measurement, and each is documented at the
 code that fixes it.
 
-**Seed the token-aligned prefix, not the keystrokes.** Pruning cannot rescue
-a string the model never proposed, so what you type is also inserted as a
-starting path. Seeding the raw text does not work: `" apricot"` is spelled
-`[" apr", "icot"]` but the partial `" aprico"` is `[" apr", "ico"]`, and from
-`"ico"` the model's likeliest continuations are `"les"` and `"es"` — `"t"` is
-not in its top eight. The natural route to the word never passes through the
-partial word's token path. Seeding `" apr"` instead reaches it immediately.
+**A length preference must never become the ranking.** An honest posterior
+always prefers the shortest completion, so length has to be credited back or
+every suggestion is one word long. Credit *linear* in length is unbounded, and
+past some point it simply decides the outcome: against `hel`, a 27-character
+`"Here is what I have written"` collected 10.8 nats, more than the cost of
+ignoring the `l` entirely. Capping it flat does not work either — a cap low
+enough to protect the match is also low enough that every sentence hits it and
+length stops ordering anything. The credit is logarithmic instead, so going
+from five characters to twenty-five is worth a lot and from forty to sixty
+very little, which is also how useful the extra text actually is.
+
+**Re-price candidates under their canonical spelling.** A seeded branch
+spells a partial word, which the model rates far below the natural spelling
+of the finished one — measured at 8 nats for `" aprico"` versus `" apricot"`.
+That is an artifact of an unnatural token split, not a statement about
+apricots, so each finished candidate is re-priced under its own tokenization
+and merged in.
+
+**Never hand the model a context that ends in a space.** Spaces belong to the
+*following* token — `" bread"` is one token — so a context that already holds
+the space forces the rarer spaceless spelling and lands the model somewhere it
+has hardly been. Measured after `"...to buy some "`, its likeliest
+continuations are the digits `1`, `2`, `3` and word fragments; drop the space
+and they are `" new"`, `" more"`, `" clothes"`. The space is kept out of the
+context and supplied by the candidate, which carries its own. This one is easy
+to never notice: it costs quality everywhere rather than failing anywhere, and
+it showed up as a stray `1` sitting at 16% among the idle suggestions. Fixing
+it moved `par` → `Paris` from 49% to 91%.
+
+**Take the top-k of the right thing.** Pruning cannot rescue a token that was
+never proposed, and a plain top-k selects on the prior alone — which is the
+wrong question once something has been typed. `"Hello"` scores −14.2 against
+`"Here"` at −11.6, under three nats apart and an entirely reasonable guess,
+yet nowhere near the top sixty-four; so typing `hel` returned every "Here …"
+and no "Hello" however long the search ran.
+
+The limit itself is not the problem and cannot be removed: the GPU already
+computes the full 248,320-way distribution, but Python cannot materialise
+248k children per node. What was wrong was *what* the top-k was taken of. So
+where a new word can begin, a second top-k is taken over only the tokens
+beginning with the next unexplained keystroke — one asks "what would the model
+write", the other "what would it write that starts the way you typed" — and
+the union is expanded. Both are exact top-k over the same distribution, so
+nothing is repriced.
+
+This replaced a whole apparatus: a sorted vocabulary index, precomputed
+shortest-first prefix buckets, a separate pricing pass for proposals, and
+literal seeding of the keystrokes as a starting path. Measured with all of it
+switched off, results were the same or better and arrived sooner — so it went,
+about a hundred lines of it.
 
 **A length preference must never become the ranking.** An honest posterior
 always prefers the shortest completion, so length has to be credited back or
@@ -385,7 +428,7 @@ Press `f1` in the TUI for the keys.
 python -m pytest
 ```
 
-149 tests, no GPU and no download: the search runs against a deterministic fake
+141 tests, no GPU and no download: the search runs against a deterministic fake
 model with a handful of string "tokens" and an explicit probability table,
 which is what makes it possible to assert that three spellings of `"cat"` sum
 to exactly 0.7 and that a pruned branch was never *explored* rather than

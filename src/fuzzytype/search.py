@@ -24,12 +24,15 @@ the unpromising strings are never decoded at all.
 The same bound gives a stopping proof: once the frontier's best bound falls
 below the k-th best finished score, no unexplored path can enter the top k.
 
-**Seeding.** Pruning cannot rescue a string the model never proposed. If you
-type a rare word, its first token may sit outside every node's top-k and the
-search will find nothing at all. So the literal keystrokes are also inserted
-as a starting path, priced with a real forward pass so it competes on an
-honest prior rather than an assumed one. That is what guarantees a word you
-are actually typing can always be completed.
+**Selecting children.** A plain top-k picks continuations on the prior alone,
+and pruning cannot rescue a token that was never picked: "Hello" sits under
+three nats from "Here" and far outside the top sixty-four, so typing "hel"
+returned every "Here ..." and no "Hello" however long the search ran. Where a
+new word can begin, a second top-k is therefore taken over only the tokens
+that begin with the next unexplained keystroke. Both are exact top-k over the
+whole 248k-token distribution the forward pass already produced, so nothing is
+repriced -- the search simply also looks at the part of the distribution the
+keystrokes point to.
 
 **Where candidates come from.** A path becomes a candidate when its text ends
 in a terminator, because that is the first moment the model has committed to
@@ -142,20 +145,13 @@ class PredictConfig:
     #: the case worth decoding -- so the real pruning is the adaptive cutoff
     #: below, and this just stops hopeless paths consuming memory.
     min_logprob: float = -32.0
-    #: Insert the literal keystrokes as a starting path, so a word the model
-    #: would never have proposed is still reachable.
-    seed_query: bool = True
-    #: How many vocabulary entries beginning with the keystrokes to consider,
-    #: and how many of them to seed once priced. Pricing is one forward pass
-    #: regardless of the first number, so it can afford to be generous.
-    seed_vocab_limit: int = 512
-    seed_vocab_top: int = 24
-    #: At every word boundary, how many vocabulary entries matching the
-    #: *still unexplained* keystrokes to propose, and how many of those the
-    #: model's own ranking keeps. This is what makes abbreviation work past
+    #: At a word boundary, how many continuations to take from the tokens
+    #: that begin with the next unexplained keystroke. This is an exact top-k
+    #: over the whole vocabulary, taken alongside the unrestricted one -- the
+    #: first asks what the model would write, this asks what it would write
+    #: that starts the way you typed. It is what makes abbreviation work past
     #: the first word.
-    boundary_vocab_limit: int = 512
-    boundary_vocab_top: int = 16
+    boundary_top_k: int = 24
     #: Re-price this many finished candidates under their canonical
     #: tokenization. 0 disables it.
     rescore_top: int = 24
@@ -190,7 +186,6 @@ class PredictStats:
     pruned_by_cutoff: int = 0
     truncated: int = 0
     duplicates: int = 0
-    seeded: int = 0
     rescored: int = 0
     seconds_model: float = 0.0
     seconds_total: float = 0.0
@@ -212,7 +207,6 @@ class PredictStats:
             "pruned_by_cutoff": self.pruned_by_cutoff,
             "truncated": self.truncated,
             "duplicates": self.duplicates,
-            "seeded": self.seeded,
             "rescored": self.rescored,
             "seconds_model": round(self.seconds_model, 3),
             "seconds_total": round(self.seconds_total, 3),
@@ -476,38 +470,81 @@ def _child(
     )
 
 
-def _boundary_ids(
-    lm: LanguageModel, node: _Node, query: str, limit: int
-) -> tuple[int, ...]:
-    """Words that could start where the keystrokes have not been explained yet.
+def _boundary_char(node: _Node, query: str) -> "str | None":
+    """The letter the next word must begin with, if a new word starts here.
 
-    Anchoring only the first word is not enough. "helhay" means "hello how are
-    you": seeding gets the search to "Hello", and then " how are you" has to
-    beat a one-token " everyone" on prior three times over, which it never
-    does -- so the abbreviation dies one word in.
-
-    At each word boundary the keystrokes that remain unexplained are looked up
-    in the vocabulary again, and the matches are kept in play regardless of
-    their rank. An abbreviation is a sequence of word-initial fragments, so
-    this simply re-anchors on each of them in turn. It costs a bisect per node
-    and a gather per row, not a forward pass.
+    Anchoring only the first word is not enough. "helhay" means "hello how
+    are you": the search reaches "Hello" and then " how are you" has to beat a
+    one-token " everyone" on prior three times over, which it never does, so
+    the abbreviation dies one word in. At every word boundary the first
+    keystroke still unexplained says how the next word begins, and the model
+    is asked for its likeliest continuations that begin that way.
     """
     if not query:
-        return ()
+        return None
     if node.text and node.text[-1] not in " \t\n":
-        return ()  # mid-word: the next token continues it, not a new word
+        return None  # mid-word: the next token continues it, not a new word
     remaining = query[node._column_min()[1] :].lstrip()
-    if not remaining:
-        return ()
-    # The fragment length is unknowable here: in "helhay" the "h" of "hay" is
-    # a whole word ("how"), yet "hay" is also a word. Guessing the longest
-    # match picks "hay" and loses "how" for good. So every plausible fragment
-    # is proposed and the model ranks them -- scoring a proposal is a gather
-    # from a row already computed, and only the best few become children.
-    ids: list[int] = []
-    for cut in range(1, min(len(remaining), 4) + 1):
-        ids.extend(lm.tokens_with_prefix(remaining[:cut], limit))
-    return tuple(dict.fromkeys(ids))
+    return remaining[0] if remaining and remaining[0].isalnum() else None
+
+
+def _top_k_complete(
+    merged: dict[str, _Merged], k: int, bound: float, margin: float
+) -> bool:
+    if len(merged) < k:
+        return False
+    kth = heapq.nlargest(k, (m.total - m.cost for m in merged.values()))[-1]
+    return bound <= kth + math.log(margin)
+
+
+def _seed_token_paths(
+    lm: LanguageModel, seeds: Sequence[str]
+) -> list[tuple[int, ...]]:
+    """Token paths to start from, given the literal texts typed.
+
+    Seeding the raw keystrokes alone does not work, and the reason is
+    tokenization rather than probability. Measured on this model, " apricot"
+    is spelled [" apr", "icot"] while the partial " aprico" is [" apr",
+    "ico"] -- the natural route to the finished word does not pass through
+    the partial word's token path at all, and from "ico" the model's likeliest
+    continuations are "les" and "es"; "t" is not in its top eight. A path that
+    can only be completed into something nobody meant is worse than useless.
+
+    So each seed also contributes its longest *token-aligned* prefix, dropping
+    the trailing partial token. " apr" is a token the model itself would
+    write, its natural continuation is "icot", and its channel cost bound is
+    zero because it prefix-matches the keystrokes -- so it competes on an
+    honest prior instead of a spelling artefact. The full text is kept too,
+    which is what guarantees that literally typing something always leaves it
+    available.
+    """
+    paths: list[tuple[int, ...]] = []
+    for text in seeds:
+        tokens = tuple(lm.encode(text))
+        if not tokens:
+            continue
+        for candidate in (tokens, tokens[:-1]):
+            if candidate and candidate not in paths:
+                paths.append(candidate)
+    return paths
+
+
+def _boundary_char(node: _Node, query: str) -> "str | None":
+    """The letter the next word must begin with, if a new word starts here.
+
+    Anchoring only the first word is not enough. "helhay" means "hello how
+    are you": the search reaches "Hello" and then " how are you" has to beat a
+    one-token " everyone" on prior three times over, which it never does, so
+    the abbreviation dies one word in. At every word boundary the first
+    keystroke still unexplained says how the next word begins, and the model
+    is asked for its likeliest continuations that begin that way.
+    """
+    if not query:
+        return None
+    if node.text and node.text[-1] not in " \t\n":
+        return None  # mid-word: the next token continues it, not a new word
+    remaining = query[node._column_min()[1] :].lstrip()
+    return remaining[0] if remaining and remaining[0].isalnum() else None
 
 
 def _top_k_complete(
@@ -669,7 +706,6 @@ def predict(
     config: PredictConfig | None = None,
     costs: ChannelCosts | None = None,
     on_progress: Callable[[PredictStats], None] | None = None,
-    seeds: Sequence[str] = (),
     on_candidates: Callable[[list[Candidate], PredictStats], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> tuple[list[Candidate], PredictStats]:
@@ -678,10 +714,6 @@ def predict(
     ``prefix_ids`` is the tokenized context to continue. ``query`` is the raw
     keystrokes typed since the last commit; empty means "no evidence yet",
     which reduces the search to a plain most-probable-continuation walk.
-    ``seeds`` are literal texts to insert as starting paths -- normally the
-    keystrokes themselves, supplied by the caller because only it knows
-    whether a leading space belongs there.
-
     ``on_candidates`` receives the ranking so far every
     ``PredictConfig.publish_every`` rounds. Searching longer finds more and
     better phrases, but a typist should not have to wait for the end of it to
@@ -722,23 +754,6 @@ def predict(
     pushed.add(())
     stats.nodes_pushed = 1
 
-    if cfg.seed_query and seeds:
-        model_started = time.monotonic()
-        seed_nodes = _seed_nodes(lm, prefix, seeds, root, query, ch_costs)
-        seed_nodes += _vocabulary_nodes(
-            lm, prefix, seeds, root, query, ch_costs,
-            cfg.seed_vocab_limit, cfg.seed_vocab_top,
-        )
-        stats.seconds_model += time.monotonic() - model_started
-        for node in seed_nodes:
-            if node.tokens in pushed:
-                continue
-            tiebreak += 1
-            heapq.heappush(frontier, (-node.priority(penalty), tiebreak, node))
-            pushed.add(node.tokens)
-            stats.nodes_pushed += 1
-            stats.seeded += 1
-
     while frontier and stats.rounds < cfg.max_rounds:
         if stats.expansions >= cfg.max_expansions:
             break
@@ -756,17 +771,14 @@ def predict(
         while frontier and len(batch) < cfg.batch_size:
             batch.append(heapq.heappop(frontier)[2])
 
-        extras = [
-            _boundary_ids(lm, node, query, cfg.boundary_vocab_limit)
-            for node in batch
-        ]
+        wanted = [_boundary_char(node, query) for node in batch]
         model_started = time.monotonic()
         tops = lm.top_next(
             [prefix + n.tokens for n in batch],
             top_k=cfg.child_top_k,
             top_p=cfg.child_top_p,
-            extra_ids=extras,
-            extra_keep=cfg.boundary_vocab_top,
+            match_chars=wanted,
+            match_top_k=cfg.boundary_top_k,
         )
         stats.seconds_model += time.monotonic() - model_started
         stats.rounds += 1

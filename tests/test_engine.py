@@ -64,24 +64,6 @@ def test_literal_commit_does_not_double_a_space_already_present():
     assert engine.text == "hello there"
 
 
-def test_seeds_carry_a_leading_space_only_mid_sentence():
-    engine = _engine()
-    assert engine.seeds("cat") == ["cat", "Cat"]
-    engine.text = "I saw a"
-    assert engine.seeds("cat") == [" cat", " Cat"]
-
-
-def test_seeds_offer_the_capitalised_spelling_for_names():
-    """A typist does not reach for shift; "alic" must still reach "Alice"."""
-    engine = _engine()
-    engine.text = "write to"
-    assert " Alic" in engine.seeds("alic")
-
-
-def test_seeds_are_empty_with_nothing_typed():
-    assert _engine().seeds("") == []
-
-
 def test_a_decode_is_only_requested_when_the_pool_stops_explaining():
     engine = _engine()
     engine.refresh("")
@@ -132,18 +114,6 @@ def test_the_pool_is_bounded():
     engine.refresh("")
     engine.refresh("ca")
     assert len(engine.pool) <= 2
-
-
-def test_the_next_decode_can_be_given_what_is_already_known():
-    """So it extends known phrases instead of re-deriving them.
-
-    Off by default -- measured as a quarter more GPU for a tenth more
-    candidates -- but the mechanism has to keep working.
-    """
-    engine = _engine(resume_seeds=8)
-    engine.refresh("")
-    known = {c.raw for c in engine.pool}
-    assert known & set(engine.seeds("ca"))
 
 
 def _prompt_engine(**config):

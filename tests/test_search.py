@@ -8,12 +8,7 @@ import pytest
 from fake_lm import FakeLM, cat_lm, long_lm, prefix_lm
 
 from fuzzytype.channel import ChannelCosts
-from fuzzytype.search import (
-    PredictConfig,
-    _emission_key,
-    _seed_token_paths,
-    predict,
-)
+from fuzzytype.search import PredictConfig, _emission_key, predict
 
 COSTS = ChannelCosts()
 CONTEXT = (1,)
@@ -118,31 +113,6 @@ def test_emission_key_drops_the_terminator_and_fires_once():
     assert _emission_key("", " cat") is None
 
 
-def test_seeding_offers_the_token_aligned_prefix_as_well():
-    """The partial word's own token path is usually a dead end.
-
-    " aprico" spells as [" apr", "ico"], from which the model will not write
-    "t". The prefix [" apr"] is the path that reaches the real word, so both
-    must be offered.
-    """
-    lm = cat_lm(CONTEXT)
-    paths = _seed_token_paths(lm, [" cart"])
-    assert tuple(lm.encode(" cart")) in paths  # the literal
-    assert tuple(lm.encode(" car")) in paths  # the token-aligned prefix
-
-
-def test_seeding_prices_the_branch_with_a_real_forward_pass():
-    lm = cat_lm(CONTEXT)
-    candidates, stats = predict(
-        lm, CONTEXT, "cart", PredictConfig(k=20, max_rounds=8), COSTS,
-        seeds=[" cart"],
-    )
-    assert stats.seeded >= 1
-    by_text = {c.text: c for c in candidates}
-    # Seeded or not, the probability reported is the model's own.
-    assert math.exp(by_text["cart"].logprob) == pytest.approx(0.3 * 0.4)
-
-
 def test_search_is_deterministic():
     first = {t: c.score for t, c in _run("ca")[1].items()}
     second = {t: c.score for t, c in _run("ca")[1].items()}
@@ -152,57 +122,6 @@ def test_search_is_deterministic():
 def test_rounds_bound_the_wall_clock():
     _, _, stats = _run(max_rounds=1)
     assert stats.rounds == 1
-
-
-def test_a_word_outside_the_top_k_is_reachable_through_the_vocabulary():
-    """Walking the tree cannot find a word the model never proposes.
-
-    A whole word is often a single token that is ranked far below the search's
-    cut-off while still being a good guess -- "Hello" scores -14.2 against
-    "Here" at -11.6, under three nats apart, yet nowhere near the top-64 the
-    search expands. Typing "hel" then offered every "Here ..." and no "Hello",
-    and adding the "l" made it *worse*, because the letter could only be
-    charged as a slip.
-    """
-    # With every vocabulary route switched off, the top-k hides the word.
-    blind_config = PredictConfig(
-        k=20, max_rounds=6, child_top_k=2, seed_query=False,
-        boundary_vocab_top=0,
-    )
-    blind = prefix_lm(CONTEXT)
-    found, _ = predict(blind, CONTEXT, "cart", blind_config, COSTS)
-    assert "cart" not in {c.text for c in found}, "top-k should hide it"
-
-    seeing = prefix_lm(CONTEXT)
-    found, stats = predict(
-        seeing, CONTEXT, "cart",
-        PredictConfig(k=20, max_rounds=6, child_top_k=2), COSTS,
-        seeds=[" cart"],
-    )
-    assert "cart" in {c.text for c in found}
-    assert stats.seeded >= 1
-
-
-def test_the_vocabulary_reaches_it_even_without_an_explicit_seed():
-    """Word boundaries re-anchor on their own, which is what carries an
-    abbreviation past its first word."""
-    lm = prefix_lm(CONTEXT)
-    found, _ = predict(
-        lm, CONTEXT, "cart",
-        PredictConfig(k=20, max_rounds=6, child_top_k=2), COSTS,
-    )
-    assert "cart" in {c.text for c in found}
-
-
-def test_the_vocabulary_seed_carries_the_model_s_own_probability():
-    seeing = prefix_lm(CONTEXT)
-    found, _ = predict(
-        seeing, CONTEXT, "cart",
-        PredictConfig(k=20, max_rounds=6, child_top_k=2), COSTS, seeds=[" cart"],
-    )
-    cart = next(c for c in found if c.text == "cart")
-    # 0.05 for " cart" then 1.0 for the terminator -- not an assumed prior.
-    assert math.exp(cart.logprob) == pytest.approx(0.05)
 
 
 def _node_for(text, query, costs, logprob=-5.0):
@@ -277,13 +196,14 @@ def test_batched_pricing_matches_pricing_one_at_a_time():
 
 
 def test_a_token_is_worth_the_same_however_the_search_reaches_it():
-    """Widening the search must not reprice anything.
+    """Looking harder in one direction must not reprice anything.
 
-    Tokens are pulled back in when they match the keystrokes, which changes
-    which continuations get explored. Their log-probabilities come from a
-    softmax over the whole vocabulary, so a token reached that way is worth
-    exactly what it would have been worth inside the top-k -- otherwise the
-    posterior would quietly depend on how hard the search happened to look.
+    A second top-k is taken over the tokens that begin the way the keystrokes
+    do, which changes which continuations get explored. Both are top-k over
+    the same softmax across the whole vocabulary, so a token reached that way
+    is worth exactly what it would have been worth in the first -- otherwise
+    the posterior would quietly depend on how hard the search happened to
+    look.
     """
     lm = cat_lm(CONTEXT)
     wide = lm.top_next([CONTEXT], top_k=10, top_p=1.0)[0]
@@ -294,7 +214,7 @@ def test_a_token_is_worth_the_same_however_the_search_reaches_it():
     assert hidden, "the narrow call should have hidden something"
 
     recovered = lm.top_next(
-        [CONTEXT], top_k=1, top_p=1.0, extra_ids=[hidden], extra_keep=len(hidden)
+        [CONTEXT], top_k=1, top_p=1.0, match_chars=["c"], match_top_k=10
     )[0]
     by_id = dict(zip(recovered.token_ids, recovered.logprobs))
     for token in hidden:
@@ -353,3 +273,28 @@ def test_a_repeating_candidate_never_reaches_the_ranking():
     )
     found, _ = predict(lm, (1,), "hh", PredictConfig(k=10, max_rounds=6), COSTS)
     assert not [c for c in found if c.text == "hahaha"]
+
+
+def test_a_word_outside_the_top_k_is_still_reachable():
+    """Pruning cannot rescue a token that was never proposed.
+
+    A plain top-k selects on the prior alone, and the word wanted is often
+    nowhere near the top: "Hello" sits under three nats from "Here" and far
+    outside the top sixty-four, so typing "hel" returned every "Here ..." and
+    no "Hello" however long the search ran. Where a new word can begin, a
+    second top-k is taken over only the tokens that begin with the next
+    unexplained keystroke -- both exact top-k over the same distribution, so
+    the search sees more of the right part of it without repricing anything.
+    """
+    hidden = PredictConfig(k=20, max_rounds=6, child_top_k=1, boundary_top_k=0)
+    blind = prefix_lm(CONTEXT)
+    found, _ = predict(blind, CONTEXT, "cart", hidden, COSTS)
+    assert "cart" not in {c.text for c in found}, "top-k alone should hide it"
+
+    seeing = prefix_lm(CONTEXT)
+    found, _ = predict(
+        seeing, CONTEXT, "cart",
+        PredictConfig(k=20, max_rounds=6, child_top_k=1, boundary_top_k=8),
+        COSTS,
+    )
+    assert "cart" in {c.text for c in found}

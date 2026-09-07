@@ -62,12 +62,6 @@ class EngineConfig:
     #: How many candidates to keep across decodes. Bigger means less is
     #: rediscovered, but every keystroke re-scores the whole pool.
     max_pool: int = 600
-    #: How many known candidates to hand the next decode as starting paths.
-    #: Off by default on measurement: typing "gt bck" one character at a time,
-    #: accumulating the pool alone gave 267 candidates in 16.8s, while adding
-    #: twelve resume seeds gave 293 in 20.7s -- a quarter more GPU for a tenth
-    #: more candidates, because each seed is priced by its own forward pass.
-    resume_seeds: int = 0
     #: "channel" ranks by a hand-calibrated typing model; "prompt" asks the
     #: language model to expand the shorthand itself. See fuzzytype.shorthand.
     mode: str = "channel"
@@ -152,32 +146,6 @@ class Engine:
         limit = self.config.max_context_tokens
         return ids[-limit:] if len(ids) > limit else ids
 
-    def seeds(self, query: str) -> list[str]:
-        """Literal texts the search should start from as well as the root.
-
-        Includes what has already been found. A candidate's prior is
-        ``P(text | context)`` and does not depend on the keystrokes at all, so
-        everything discovered under a previous query is still valid -- handing
-        the best of it back means the next decode extends "get back to you"
-        into "get back to you as soon as possible" instead of rediscovering
-        the first four words.
-
-        Only this layer knows whether a leading space belongs in front of the
-        keystrokes, because only it knows what has been committed.
-        """
-        resume = [c.raw for c in self.pool[: self.config.resume_seeds] if c.raw]
-        if not query:
-            return resume
-        lead = "" if self._at_word_start() else " "
-        variants = [query]
-        # A typist does not reach for shift on a name. The channel forgives the
-        # case when *ranking*, but a lowercase seed can only ever grow into a
-        # lowercase word -- "alic" never reaches "Alice" -- so the capitalised
-        # spelling has to be offered to the search as its own starting path.
-        if query[:1].islower():
-            variants.append(query[:1].upper() + query[1:])
-        return [lead + v for v in variants] + resume
-
     def refresh(
         self,
         query: str = "",
@@ -208,7 +176,6 @@ class Engine:
             query=search_query,
             config=self.predict_config,
             costs=self.costs,
-            seeds=[] if self.config.mode == "prompt" else self.seeds(query),
             on_candidates=publish,
             should_stop=should_stop,
         )

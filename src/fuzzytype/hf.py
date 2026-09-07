@@ -25,7 +25,6 @@ this keeps the backend a single stateless call.
 from __future__ import annotations
 
 import math
-from bisect import bisect_left
 from collections.abc import Sequence
 
 import torch
@@ -101,91 +100,22 @@ class HFLanguageModel:
             else self.tokenizer.eos_token_id
         )
         self._token_bytes, self.special_token_ids = self._build_token_bytes()
-        self._prefix_keys, self._prefix_ids = self._build_prefix_index()
-        self._short_prefixes = self._build_short_prefixes()
+        self._first_char = self._build_first_char()
 
-    def _build_prefix_index(self) -> tuple[list[str], list[int]]:
-        """Vocabulary sorted by its text, for "which words start with this".
+    def _build_first_char(self) -> "torch.Tensor":
+        """The first letter each token would write, as a code point per id.
 
-        A whole word is very often a single token, and the model's ranking of
-        that token can sit thousands of places down the distribution while
-        still being a perfectly good guess: after this preamble "Hello" scores
-        -14.2 against "Here" at -11.6, a gap of under three nats, yet it is
-        nowhere near the top-64 the search expands. No amount of tree walking
-        finds it, because it is one token away and simply never proposed.
-
-        Looking it up in the vocabulary costs nothing at query time and one
-        forward pass to price. Leading spaces and case are normalised away so
-        that typing "hel" finds "Hello", " hello" and "Helsinki" alike.
+        Lets the search take a second top-k over *only* the tokens that could
+        begin the next word, which is an exact top-k over the whole
+        vocabulary rather than a lookup into part of it.
         """
-        pairs = sorted(
-            (self._token_bytes[i].decode("utf-8", errors="replace").lstrip().lower(), i)
-            for i in range(len(self._token_bytes))
-            if i not in self.special_token_ids
-        )
-        return [k for k, _ in pairs], [i for _, i in pairs]
-
-    def _build_short_prefixes(self, depth: int = 2, cap: int = 2048) -> dict:
-        """Shortest-first token lists for one- and two-character prefixes.
-
-        These are the ranges too large to order at query time -- and the ones
-        that matter most, since a word abbreviated to a single letter is
-        exactly the case that needs them.
-        """
-        buckets: dict[str, list[tuple[int, int]]] = {}
-        for key, tid in zip(self._prefix_keys, self._prefix_ids):
-            for n in range(1, min(depth, len(key)) + 1):
-                buckets.setdefault(key[:n], []).append((len(key), tid))
-        out = {}
-        for prefix, entries in buckets.items():
-            entries.sort()
-            out[prefix] = tuple(tid for _, tid in entries[:cap])
-        return out
-
-    def tokens_with_prefix(self, prefix: str, limit: int = 512) -> list[int]:
-        """Token ids whose text starts with ``prefix``, ignoring case and space.
-
-        Ordered shortest-key first, because when only a few can be taken the
-        short word is nearly always the one meant -- "how" before "however".
-
-        Short prefixes are precomputed. Taking the first N of the alphabetical
-        range and sorting *those* by length is a trap: thousands of tokens
-        begin with "h", so the cut lands somewhere in "hab..." and "how" is
-        never seen at all, which silently breaks abbreviation past the first
-        word. The ordering has to be applied to the whole range.
-        """
-        key = prefix.lstrip().lower()
-        if not key:
-            return []
-        bucket = self._short_prefixes.get(key)
-        if bucket is not None:
-            return list(bucket[:limit])
-        found: list[tuple[int, int]] = []
-        start = bisect_left(self._prefix_keys, key)
-        for i in range(start, len(self._prefix_keys)):
-            if not self._prefix_keys[i].startswith(key):
-                break
-            found.append((len(self._prefix_keys[i]), self._prefix_ids[i]))
-        found.sort()
-        return [i for _, i in found[:limit]]
+        codes = []
+        for raw in self._token_bytes:
+            text = raw.decode("utf-8", errors="replace").lstrip().lower()
+            codes.append(ord(text[0]) if text and text[0].isalnum() else -1)
+        return torch.tensor(codes, dtype=torch.int32, device=self.device)
 
     @torch.no_grad()
-    def token_logprobs(
-        self, sequence: Sequence[int], token_ids: Sequence[int]
-    ) -> list[float]:
-        """log P(token | sequence) for specific tokens, in one forward pass.
-
-        The cost does not depend on how many tokens are asked about, which is
-        what makes a wide vocabulary lookup affordable.
-        """
-        if not token_ids:
-            return []
-        ids = torch.tensor([list(sequence)], dtype=torch.long, device=self.device)
-        logits = self.model(input_ids=ids, logits_to_keep=1).logits[:, -1, :]
-        logprobs = torch.log_softmax(logits.float(), dim=-1)[0]
-        wanted = torch.tensor(list(token_ids), dtype=torch.long, device=self.device)
-        return logprobs.index_select(0, wanted).tolist()
-
     def _build_token_bytes(self) -> tuple[list[bytes], frozenset[int]]:
         """Per-token raw bytes, plus the ids the search must not decode through.
 
@@ -258,18 +188,25 @@ class HFLanguageModel:
         *,
         top_k: int,
         top_p: float,
-        extra_ids: "Sequence[Sequence[int]] | None" = None,
-        extra_keep: int = 0,
+        match_chars: "Sequence[str | None] | None" = None,
+        match_top_k: int = 0,
     ) -> list[TopK]:
-        """Truncated next-token distributions, plus any tokens asked for.
+        """Truncated next-token distributions, one per input sequence.
 
-        ``extra_ids`` carries tokens the caller wants considered whatever
-        their rank -- the words that match the keystrokes still unexplained.
-        Their log-probabilities come out of the row already computed, so
-        proposing many costs a gather rather than a forward pass, and only
-        the best ``extra_keep`` are returned. That split matters: the caller
-        cannot tell which of "h", "ha" or "hay" begins the next word, so it
-        proposes all of them and lets the model say.
+        A plain top-k selects on the prior alone, and that is the wrong
+        question when something has been typed: pruning cannot rescue a token
+        that was never proposed, and the token wanted is often nowhere near
+        the top. Measured, "Hello" sits under three nats from "Here" and far
+        outside the top sixty-four, so typing "hel" returned every "Here ..."
+        and no "Hello" however long the search ran.
+
+        So when ``match_chars`` names the letter the next word must begin
+        with, a second top-k is taken over *only* the tokens that begin with
+        it. Both are exact top-k over the whole 248k-token distribution the
+        forward pass already produced -- the first asks "what would the model
+        write", the second "what would it write that starts the way you
+        typed" -- and the union is returned. No threshold and no weighting is
+        involved, so nothing is repriced.
         """
         results: list[TopK | None] = [None] * len(sequences)
         for idxs in _buckets(sequences).values():
@@ -283,6 +220,7 @@ class HFLanguageModel:
                 logprobs = torch.log_softmax(logits.float(), dim=-1)
                 k = min(top_k, logprobs.shape[-1])
                 vals, inds = torch.topk(logprobs, k, dim=-1)
+                matched = self._matching_top_k(logprobs, chunk, match_chars, match_top_k)
                 probs = vals.exp()
                 # topk is sorted descending, so "mass strictly before this
                 # token < top_p" is a prefix mask and always keeps at least one.
@@ -294,27 +232,19 @@ class HFLanguageModel:
                     n = int(kept_l[row])
                     ids = list(inds_l[row][:n])
                     lps = list(vals_l[row][:n])
-                    wanted = list(extra_ids[i]) if extra_ids is not None else []
                     seen = set(ids)
-                    wanted = [t for t in dict.fromkeys(wanted) if t not in seen]
                     mass = float(sum(probs_l[row][:n]))
-                    if wanted and extra_keep > 0:
-                        picked = torch.tensor(
-                            wanted, dtype=torch.long, device=self.device
-                        )
-                        scored = logprobs[row].index_select(0, picked).tolist()
-                        best = sorted(
-                            zip(wanted, scored), key=lambda kv: -kv[1]
-                        )[:extra_keep]
-                        ids.extend(t for t, _ in best)
-                        lps.extend(lp for _, lp in best)
-                        # These are extra tokens *kept*, so they belong in the
-                        # mass that says how much was kept. Their
-                        # log-probabilities are untouched -- the row is a
-                        # log_softmax over the whole vocabulary, so a token
-                        # reached this way is worth exactly what it would have
-                        # been worth inside the top-k.
-                        mass += float(sum(math.exp(lp) for _, lp in best))
+                    for token, logprob in matched[row]:
+                        if token in seen:
+                            continue
+                        seen.add(token)
+                        ids.append(token)
+                        lps.append(logprob)
+                        # Kept, so it counts towards how much was kept. Both
+                        # selections come from the same log_softmax over the
+                        # whole vocabulary, so a token reached this way is
+                        # worth exactly what it was worth in the first.
+                        mass += math.exp(logprob)
                     results[i] = TopK(
                         token_ids=tuple(ids),
                         logprobs=tuple(lps),
@@ -324,6 +254,39 @@ class HFLanguageModel:
         if missing:  # pragma: no cover - defensive
             raise RuntimeError(f"no distribution computed for rows {missing}")
         return results  # type: ignore[return-value]
+
+    def _matching_top_k(
+        self,
+        logprobs: "torch.Tensor",
+        chunk: list[int],
+        match_chars: "Sequence[str | None] | None",
+        match_top_k: int,
+    ) -> list[list[tuple[int, float]]]:
+        """The likeliest tokens that *begin* with each row's wanted letter."""
+        blank: list[list[tuple[int, float]]] = [[] for _ in chunk]
+        if match_chars is None or match_top_k < 1:
+            return blank
+        wanted = [match_chars[i] for i in chunk]
+        if not any(wanted):
+            return blank
+        codes = torch.tensor(
+            [ord(c.lower()) if c else -2 for c in wanted],
+            dtype=torch.int32,
+            device=self.device,
+        ).unsqueeze(1)
+        allowed = self._first_char.unsqueeze(0) == codes
+        masked = logprobs.masked_fill(~allowed, float("-inf"))
+        k = min(match_top_k, masked.shape[-1])
+        vals, inds = torch.topk(masked, k, dim=-1)
+        vals_l, inds_l = vals.tolist(), inds.tolist()
+        return [
+            [
+                (token, logprob)
+                for token, logprob in zip(inds_l[row], vals_l[row])
+                if logprob != float("-inf")
+            ]
+            for row in range(len(chunk))
+        ]
 
     @torch.no_grad()
     def sequence_logprobs(

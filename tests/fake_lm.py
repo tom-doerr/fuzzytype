@@ -58,7 +58,7 @@ class FakeLM:
             raise AssertionError("sequence does not start with the context")
         return self._key(sequence[len(self.context) :])
 
-    def top_next(self, sequences, *, top_k, top_p, extra_ids=None, extra_keep=0):
+    def top_next(self, sequences, *, top_k, top_p, match_chars=None, match_top_k=0):
         results = []
         for index, seq in enumerate(sequences):
             state = self._state(seq)
@@ -77,18 +77,19 @@ class FakeLM:
             chosen = {self.ids[t] for t, _ in kept}
             token_ids = [self.ids[t] for t, _ in kept]
             logprobs = [math.log(p) for _, p in kept]
-            proposed = []
-            for tid in (extra_ids[index] if extra_ids is not None else ()):
-                if tid in chosen:
-                    continue
-                probability = dist.get(self.vocab[tid], 0.0)
-                if probability > 0.0:
-                    proposed.append((tid, math.log(probability)))
-            proposed.sort(key=lambda kv: -kv[1])
-            for tid, lp in proposed[:extra_keep]:
-                chosen.add(tid)
-                token_ids.append(tid)
-                logprobs.append(lp)
+            char = match_chars[index] if match_chars is not None else None
+            if char and match_top_k > 0:
+                starts = []
+                for tok, prob in dist.items():
+                    tid = self.ids[tok]
+                    stripped = tok.lstrip().lower()
+                    if tid not in chosen and stripped[:1] == char.lower():
+                        starts.append((tid, math.log(prob)))
+                starts.sort(key=lambda kv: -kv[1])
+                for tid, lp in starts[:match_top_k]:
+                    chosen.add(tid)
+                    token_ids.append(tid)
+                    logprobs.append(lp)
             results.append(
                 TopK(
                     token_ids=tuple(token_ids),
@@ -166,6 +167,66 @@ def long_lm(context=(1,)):
     return FakeLM(LONG_VOCAB, LONG_TABLE, context=context)
 
 
+#: A world with one genuinely long word, so that channel pruning has
+#: something long enough to prune. The error budget grows with the query but
+#: the cost of an unmatched candidate grows with its *length*, so a four
+#: letter vocabulary can never trigger the prune at all.
+LONG_VOCAB = ["<eos>", " ", ".", " ele", "ph", "ant", " cat"]
+LONG_TABLE = {
+    (): {" ele": 0.5, " cat": 0.5},
+    (" ele",): {"ph": 1.0},
+    (" ele", "ph"): {"ant": 1.0},
+    (" ele", "ph", "ant"): {" ": 1.0},
+    (" ele", "ph", "ant", " "): {"<eos>": 1.0},
+    (" cat",): {" ": 1.0},
+    (" cat", " "): {"<eos>": 1.0},
+}
+
+
+def long_lm(context=(1,)):
+    return FakeLM(LONG_VOCAB, LONG_TABLE, context=context)
+
+
+#: A world with one genuinely long word, so that channel pruning has
+#: something long enough to prune. The error budget grows with the query but
+#: the cost of an unmatched candidate grows with its *length*, so a four
+#: letter vocabulary can never trigger the prune at all.
+LONG_VOCAB = ["<eos>", " ", ".", " ele", "ph", "ant", " cat"]
+LONG_TABLE = {
+    (): {" ele": 0.5, " cat": 0.5},
+    (" ele",): {"ph": 1.0},
+    (" ele", "ph"): {"ant": 1.0},
+    (" ele", "ph", "ant"): {" ": 1.0},
+    (" ele", "ph", "ant", " "): {"<eos>": 1.0},
+    (" cat",): {" ": 1.0},
+    (" cat", " "): {"<eos>": 1.0},
+}
+
+
+def long_lm(context=(1,)):
+    return FakeLM(LONG_VOCAB, LONG_TABLE, context=context)
+
+
+#: A world with one genuinely long word, so that channel pruning has
+#: something long enough to prune. The error budget grows with the query but
+#: the cost of an unmatched candidate grows with its *length*, so a four
+#: letter vocabulary can never trigger the prune at all.
+LONG_VOCAB = ["<eos>", " ", ".", " ele", "ph", "ant", " cat"]
+LONG_TABLE = {
+    (): {" ele": 0.5, " cat": 0.5},
+    (" ele",): {"ph": 1.0},
+    (" ele", "ph"): {"ant": 1.0},
+    (" ele", "ph", "ant"): {" ": 1.0},
+    (" ele", "ph", "ant", " "): {"<eos>": 1.0},
+    (" cat",): {" ": 1.0},
+    (" cat", " "): {"<eos>": 1.0},
+}
+
+
+def long_lm(context=(1,)):
+    return FakeLM(LONG_VOCAB, LONG_TABLE, context=context)
+
+
 def _prefix_methods(cls):
     """Vocabulary lookup, so the fake supports prefix seeding too."""
 
@@ -194,9 +255,6 @@ def _prefix_methods(cls):
     cls.tokens_with_prefix = tokens_with_prefix
     cls.token_logprobs = token_logprobs
     return cls
-
-
-_prefix_methods(FakeLM)
 
 
 #: A world where one whole word is a single token that the walk cannot reach,
